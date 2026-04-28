@@ -36,7 +36,7 @@ RESET_PIN = 25          # GPIO pin connected to reset (optional, if connected)
 
 
 # FSK-specific configurations
-FSK_FREQ = 868.0            # Frequency in MHz for FSK
+FSK_FREQ = 867.0            # Frequency in MHz for FSK
 FSK_TX_POWER = 0            # Transmission power in dBm for FSK
 FSK_FIX_LEN = 0             # Set to 0 for variable length packets in FSK
 FSK_PAYLOAD_LEN = 255       # Set maximum payload length for FSK
