@@ -1,46 +1,45 @@
 from radio_handle import *
+from crypto_layer import CryptoLayer
 
-## Example usage of the RadioHandler class
+AES_KEY = bytes.fromhex("AE6852F8121067CC4BF7A5765577F39E")
 
-# Some defines
-# To fully customize the radio settings, you can change the values in radio_defines.py
-RADIO_MODE = RadioMode.FSK # Set the radio modulation: RadioMode.LORA or RadioMode.FSK
-SEND_DELAY = 5  # Delay [s] between sending messages
-SEND_MSG = "Hello!"  # Message to send
-SEND_MESSAGES = True  # Set to False to only receive messages
+RADIO_MODE = RadioMode.FSK
+SEND_DELAY = 5
+SEND_MSG = b"Hello BEKO!"
+SEND_MESSAGES = True
 
-
+crypto = CryptoLayer(AES_KEY)
 
 
-# Callback function to handle received data.
-# This function will be called every time data is received.
 def data_callback(data, rssi=None, index=None):
-    print(f"Received data: {data}")
+    try:
+        plaintext = crypto.decrypt(data)  # data to str — crypto sam konwertuje
+        print(f"Odebrano: {plaintext}")
+    except ValueError as e:
+        print(f"[SECURITY] Ramka odrzucona: {e}")
 
-# Initialize the RadioHandler with mode of choice and the data callback.
-# The RadioHandler will start receiving data in a separate thread. 
+
 radio_handler = RadioHandler(RADIO_MODE, data_callback)
 
 
 if SEND_MESSAGES:
-    # Function to send messages every 10 seconds
     def send_messages():
         while True:
-            radio_handler.send(SEND_MSG)
-            sleep(SEND_DELAY)  # Add a delay to avoid spamming messages
+            try:
+                encrypted = crypto.encrypt(SEND_MSG)  # zwraca str — gotowe dla send()
+                radio_handler.send(encrypted)
+            except Exception as e:
+                print(f"Błąd wysyłania: {e}")
+            sleep(SEND_DELAY)
 
-    # Start the send_messages function in a separate thread
     send_thread = Thread(target=send_messages)
-    # Set the thread as a daemon so it will shut down on program exit
-    send_thread.daemon = True  
-
-    # Start the send thread. It will send messages every 10 seconds. After every send operation, the radio handler will go back to receiving mode.
+    send_thread.daemon = True
     send_thread.start()
 
 try:
     while True:
         pass
 except KeyboardInterrupt:
-    print("Reception stopped.")
+    print("Zatrzymano.")
 finally:
-    radio_handler.cleanup()  # Clean up GPIO and close SPI
+    radio_handler.cleanup()

@@ -16,6 +16,11 @@ Wewnętrznie:
 Frame format (na radio):
     [IV: 16B] [Ciphertext: len(message)] [MIC: 4B]
 
+Konwersja radio_handle:
+    - send:    bytes → str (przez chr()) przed wysłaniem
+    - receive: str → bytes (przez ord()) po odebraniu
+    Crypto layer obsługuje obie konwersje transparentnie.
+
 ============================================================================
 """
 
@@ -27,23 +32,20 @@ import struct
 class CryptoLayer:
     """
     Moduł szyfrowania: AES-128-CTR + HMAC-SHA256
-    
-    Interfejs kompatybilny z FSK._encrypt/_decrypt()
-    
-    Użycie:
-        crypto = CryptoLayer(key)
-        encrypted = crypto.encrypt(plaintext)
-        plaintext = crypto.decrypt(encrypted)
+
+    Interfejs kompatybilny z radio_handle (FSK/LoRa):
+        encrypted_str = crypto.encrypt(plaintext)   # zwraca str dla radio_handle.send()
+        plaintext_str = crypto.decrypt(encoded_str) # przyjmuje str z data_callback
     """
-    
+
     CRYPTO_KEY_SIZE = 16
     CRYPTO_MIC_SIZE = 4
     CRYPTO_MAX_DATA = 256
-    
+
     def __init__(self, key):
         """
         Inicjalizacja warstwy kryptografii
-        
+
         Args:
             key: 16-bajtowy klucz AES-128 (bytes)
         """
@@ -51,249 +53,211 @@ class CryptoLayer:
             raise TypeError("Key must be bytes")
         if len(key) != self.CRYPTO_KEY_SIZE:
             raise ValueError(f"Key must be {self.CRYPTO_KEY_SIZE} bytes")
-        
+
         self.key = bytes(key)
         self.tx_counter = 0
         self.rx_counter_last = 0xFFFFFFFF
-        
+
         print(f"INFO: Crypto initialized")
-    
+
+    # ------------------------------------------------------------------ #
+    #  Helpers: konwersja str <-> bytes (kompatybilność z radio_handle)   #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _bytes_to_radio_str(data: bytes) -> str:
+        """
+        Konwertuj bytes → str w sposób kompatybilny z radio_handle.
+        radio_handle.handle_received_data robi: chr(elem) for elem in data
+        Więc send musi dostarczyć coś co po tej konwersji da oryginalne bajty.
+        Używamy latin-1: bajt N → chr(N), odwracalne przez ord(c).
+        """
+        return data.decode('latin-1')
+
+    @staticmethod
+    def _radio_str_to_bytes(data: str) -> bytes:
+        """
+        Konwertuj str → bytes — odwrócenie konwersji z handle_received_data.
+        handle_received_data: ''.join(chr(elem) for elem in raw_bytes)
+        Odwrócenie:           bytes(ord(c) for c in string)
+        """
+        return bytes(ord(c) for c in data)
+
+    # ------------------------------------------------------------------ #
+    #  Wewnętrzna kryptografia                                            #
+    # ------------------------------------------------------------------ #
+
     @staticmethod
     def _counter_to_iv(counter):
-        """
-        Wygeneruj IV z frame_counter
-        IV = [counter (4B big-endian)] + [zeros (12B)]
-        """
-        iv = struct.pack('>I', counter & 0xFFFFFFFF) + b'\x00' * 12
-        return iv
-    
+        """IV = [counter (4B big-endian)] + [zeros (12B)]"""
+        return struct.pack('>I', counter & 0xFFFFFFFF) + b'\x00' * 12
+
     @staticmethod
     def _iv_to_counter(iv):
-        """
-        Ekstrahuj counter z IV
-        """
         return struct.unpack('>I', iv[:4])[0]
-    
+
     def _compute_hmac(self, iv, ciphertext):
-        """
-        Oblicz HMAC-SHA256(IV || ciphertext)[:4]
-        """
+        """HMAC-SHA256(IV || ciphertext)[:4]"""
         hmac = HMAC.new(self.key, digestmod=SHA256)
         hmac.update(iv)
         hmac.update(ciphertext)
-        digest = hmac.digest()
-        return digest[:self.CRYPTO_MIC_SIZE]
-    
-    def encrypt(self, plaintext):
+        return hmac.digest()[:self.CRYPTO_MIC_SIZE]
+
+    # ------------------------------------------------------------------ #
+    #  Publiczny interfejs                                                 #
+    # ------------------------------------------------------------------ #
+
+    def encrypt(self, plaintext) -> str:
         """
-        Szyfruj dane (AES-128-CTR + HMAC-SHA256)
-        
-        Interfejs kompatybilny z FSK._encrypt():
-            encrypted = crypto.encrypt(plaintext)
-        
+        Szyfruj dane i zwróć str gotowy do radio_handle.send().
+
         Args:
-            plaintext: dane do szyfrowania (bytes)
-        
+            plaintext: dane do szyfrowania (bytes, bytearray lub str)
+
         Returns:
-            bytes: [IV (16B)] + [ciphertext (N)] + [MIC (4B)]
-        
+            str: zaszyfrowana ramka zakodowana jako latin-1 string
+                 Format wewnętrzny: [IV (16B)] + [ciphertext (N)] + [MIC (4B)]
+
         Raises:
             ValueError: jeśli dane są za duże
         """
-        if not isinstance(plaintext, (bytes, bytearray)):
+        # Normalizacja wejścia
+        if isinstance(plaintext, str):
+            plaintext = plaintext.encode('utf-8')
+        else:
             plaintext = bytes(plaintext)
-        
+
         if len(plaintext) == 0 or len(plaintext) > self.CRYPTO_MAX_DATA:
             raise ValueError(f"Plaintext must be 1-{self.CRYPTO_MAX_DATA} bytes")
-        
-        # Wygeneruj IV
+
+        # Szyfrowanie
         iv = self._counter_to_iv(self.tx_counter)
-        
-        # Szyfruj AES-CTR (bez paddingu!)
         cipher = AES.new(self.key, AES.MODE_CTR, nonce=iv[:8])
         ciphertext = cipher.encrypt(plaintext)
-        
-        # Wylicz HMAC
         mic = self._compute_hmac(iv, ciphertext)
-        
-        # Inkrementuj counter
+
         self.tx_counter = (self.tx_counter + 1) & 0xFFFFFFFF
-        
-        # Zwróć spakowany frame: IV + ciphertext + MIC
-        encrypted_msg = iv + ciphertext + mic
-        
-        print(f"ENCRYPT: {len(plaintext)} bytes → {len(encrypted_msg)} bytes "
-              f"(IV={len(iv)}, CT={len(ciphertext)}, MIC={len(mic)}), ctr={self.tx_counter-1}")
-        
-        return encrypted_msg
-    
-    def decrypt(self, encrypted_msg):
+
+        encrypted_bytes = iv + ciphertext + mic
+
+        print(f"ENCRYPT: {len(plaintext)} bytes → {len(encrypted_bytes)} bytes "
+              f"(ctr={self.tx_counter - 1})")
+
+        # Zwróć jako str gotowy dla radio_handle.send()
+        return self._bytes_to_radio_str(encrypted_bytes)
+
+    def decrypt(self, encrypted_msg) -> bytes:
         """
-        Odszyfruj dane (AES-128-CTR) + sprawdź HMAC
-        
-        Interfejs kompatybilny z FSK._decrypt():
-            plaintext = crypto.decrypt(encrypted_msg)
-        
+        Odszyfruj dane z radio_handle data_callback.
+
         Args:
-            encrypted_msg: bytes z formatem [IV (16B)] + [ciphertext (N)] + [MIC (4B)]
-        
+            encrypted_msg: str z data_callback (latin-1 encoded)
+                           lub bytes (dla bezpośredniego użycia)
+
         Returns:
             bytes: odszyfrowane dane
-        
+
         Raises:
             ValueError: jeśli HMAC verification failed lub replay attack
         """
-        if not isinstance(encrypted_msg, (bytes, bytearray)):
+        # Normalizacja wejścia — obsługa str z radio_handle
+        if isinstance(encrypted_msg, str):
+            encrypted_msg = self._radio_str_to_bytes(encrypted_msg)
+        else:
             encrypted_msg = bytes(encrypted_msg)
-        
+
         # Min: 16 (IV) + 1 (min CT) + 4 (MIC) = 21 bajtów
         if len(encrypted_msg) < 21:
-            raise ValueError(f"Encrypted message too short: {len(encrypted_msg)} bytes (min 21)")
-        
+            raise ValueError(
+                f"Encrypted message too short: {len(encrypted_msg)} bytes (min 21)")
+
         # Rozpakuj
         iv = encrypted_msg[:16]
         mic = encrypted_msg[-4:]
         ciphertext = encrypted_msg[16:-4]
-        
-        # Sprawdź HMAC
+
+        # Weryfikacja HMAC
         computed_mic = self._compute_hmac(iv, ciphertext)
-        
         if computed_mic != mic:
             print(f"ERROR: HMAC verification failed!")
             print(f"  Computed: {computed_mic.hex().upper()}")
             print(f"  Received: {mic.hex().upper()}")
             raise ValueError("HMAC verification failed - tampering detected!")
-        
-        # Sprawdź replay
+
+        # Weryfikacja replay
         counter = self._iv_to_counter(iv)
-        
         if counter <= self.rx_counter_last:
             print(f"ERROR: Replay attack detected! (ctr={counter}, last={self.rx_counter_last})")
             raise ValueError("Replay attack detected!")
-        
-        # Odszyfruj AES-CTR
+
+        # Odszyfrowanie
         cipher = AES.new(self.key, AES.MODE_CTR, nonce=iv[:8])
         plaintext = cipher.decrypt(ciphertext)
-        
-        # Aktualizuj ostatni counter
+
         self.rx_counter_last = counter
-        
+
         print(f"DECRYPT: {len(ciphertext)} bytes → {len(plaintext)} bytes, ctr={counter}")
-        
+
         return plaintext
-    
+
     def self_test(self):
-        """
-        Prosty self-test
-        """
+        """Prosty self-test"""
         print("\n=== CRYPTO SELF-TEST ===")
-        
+
         key = bytes.fromhex("AE6852F8121067CC4BF7A5765577F39E")
         plaintext = b'Test message!!!!'
-        
+
         crypto = CryptoLayer(key)
-        
-        # Test 1: Encrypt
-        print("[1] Encrypt...")
-        encrypted = crypto.encrypt(plaintext)
-        print(f"    Size: {len(encrypted)} bytes")
-        
-        # Test 2: Decrypt
-        print("[2] Decrypt...")
-        decrypted = crypto.decrypt(encrypted)
-        
-        # Test 3: Compare
+
+        print("[1] Encrypt → str...")
+        encrypted_str = crypto.encrypt(plaintext)
+        assert isinstance(encrypted_str, str), "encrypt() powinno zwracać str"
+        print(f"    Typ: {type(encrypted_str)}, długość: {len(encrypted_str)}")
+
+        print("[2] Decrypt ← str...")
+        decrypted = crypto.decrypt(encrypted_str)
+
         print("[3] Compare...")
         if plaintext == decrypted:
-            print("✓ SUCCESS")
+            print("✓ SUCCESS: encrypt→decrypt roundtrip OK")
         else:
-            print("✗ FAILED")
-            print(f"  Original:  {plaintext}")
-            print(f"  Decrypted: {decrypted}")
+            print(f"✗ FAILED\n  Original:  {plaintext}\n  Decrypted: {decrypted}")
             return False
-        
-        # Test 4: Test tampering
-        print("[4] Test tampering detection...")
-        encrypted_tampered = encrypted[:-4] + bytes([encrypted[-4] ^ 0xFF]) + encrypted[-3:]
-        
+
+        print("[4] Tampering detection...")
+        # Zepsuj MIC w stringu
+        b = bytearray(encrypted_str.encode('latin-1'))
+        b[-4] ^= 0xFF
+        tampered_str = b.decode('latin-1')
         try:
-            crypto.decrypt(encrypted_tampered)
-            print("✗ Should detect tampering")
+            crypto.decrypt(tampered_str)
+            print("✗ Powinno wykryć manipulację")
             return False
         except ValueError as e:
             if "HMAC" in str(e):
                 print("✓ Tampering detected")
             else:
-                print(f"✗ Wrong error: {e}")
+                print(f"✗ Zły błąd: {e}")
                 return False
-        
-        # Test 5: Test replay detection
-        print("[5] Test replay detection...")
-        encrypted_new = crypto.encrypt(b'Another test!!!')
-        
-        # Try decrypt old frame again
+
+        print("[5] Replay detection...")
+        crypto.encrypt(b'Another msg!!!!!')
         try:
-            crypto.decrypt(encrypted)
-            print("✗ Should detect replay")
+            crypto.decrypt(encrypted_str)
+            print("✗ Powinno wykryć replay")
             return False
         except ValueError as e:
             if "Replay" in str(e):
                 print("✓ Replay detected")
             else:
-                print(f"✗ Wrong error: {e}")
+                print(f"✗ Zły błąd: {e}")
                 return False
-        
+
         print("\n=== ALL TESTS PASSED ===\n")
         return True
 
 
-# ============================================================================
-# USAGE WITH FSK CLASS
-# ============================================================================
-
-"""
-Użycie z klasą FSK:
-
-    from crypto_layer import CryptoLayer
-    from FSK import FSK
-    
-    # Init FSK
-    fsk = FSK(
-        spiport=0,
-        channel=0,
-        interrupt=4,
-        interrupt1=17,
-        interrupt2=27,
-        freq=868,
-        tx_power=20,
-        crypto=CryptoLayer(key)  # <-- pass crypto instance
-    )
-    
-    # Wysyłanie
-    fsk.write(plaintext)  # FSK automatycznie szyfruje
-    
-    # Odbieranie
-    plaintext = fsk.read()  # FSK automatycznie deszyfruje
-
-Istniejące metody FSK._encrypt/_decrypt będą działać transparentnie!
-"""
-
-
 if __name__ == "__main__":
-    print("=== CRYPTO LAYER TEST ===\n")
-    
     key = bytes.fromhex("AE6852F8121067CC4BF7A5765577F39E")
     crypto = CryptoLayer(key)
-    
-    # Simple test
-    plaintext = b'Hello World!!!!\x00'
-    encrypted = crypto.encrypt(plaintext)
-    decrypted = crypto.decrypt(encrypted)
-    
-    print(f"\nOriginal:   {plaintext}")
-    print(f"Encrypted:  {len(encrypted)} bytes")
-    print(f"Decrypted:  {decrypted}")
-    print(f"Match: {plaintext == decrypted}\n")
-    
-    # Self-test
     crypto.self_test()
