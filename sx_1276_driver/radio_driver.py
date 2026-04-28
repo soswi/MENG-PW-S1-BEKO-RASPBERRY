@@ -57,6 +57,14 @@ class FSK(object):
         GPIO.setup(self._interrupt, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         GPIO.setup(self._interrupt1, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         GPIO.setup(self._interrupt2, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
+        # Usuń stare event detect jeśli istnieją (zabezpieczenie przed "Failed to add edge detection")
+        for pin in [self._interrupt, self._interrupt1, self._interrupt2]:
+            try:
+                GPIO.remove_event_detect(pin)
+            except Exception:
+                pass
+
         GPIO.add_event_detect(self._interrupt, GPIO.RISING, callback=self._handle_interrupt)
         GPIO.add_event_detect(self._interrupt1, GPIO.RISING, callback=self._handle_interrupt1)
         GPIO.add_event_detect(self._interrupt2, GPIO.RISING, callback=self._handle_interrupt2)
