@@ -28,33 +28,31 @@ def parse_frame(data: str):
     raw = bytes(ord(c) for c in data)
     print(f"  RAW ({len(raw)}B): {raw.hex().upper()}")
 
-    # Nowa struktura: type(1)+counter(2)+flags(1)+data(64)+data_len(1)+crc(2)+dst(1)+src(1) = 73B
-    if len(raw) < 73:
-        print(f"  WARN: za krótka ramka ({len(raw)}B < 73B)")
+    # type(1)+counter(2)+flags(1)+data(32)+data_len(1)+crc(2)+dst(1)+src(1) = 41B
+    if len(raw) < 41:
+        print(f"  WARN: za krótka ramka ({len(raw)}B < 41B)")
         return
 
     frame_type = raw[0]
     counter    = struct.unpack_from('<H', raw, 1)[0]
     flags      = raw[3]
-    enc_data   = raw[4:68]    # 64 bajty pola data
-    data_len   = raw[68]
-    crc_recv   = struct.unpack_from('<H', raw, 69)[0]
-    dst        = raw[71]
-    src        = raw[72]
+    enc_data   = raw[4:36]     # 32 bajty pola data
+    data_len   = raw[36]
+    crc_recv   = struct.unpack_from('<H', raw, 37)[0]
+    dst        = raw[39]
+    src        = raw[40]
 
-    # Weryfikacja CRC
-    crc_calc = crc16(raw[:69])
+    crc_calc = crc16(raw[:37])  # wszystko przed polem crc
     crc_ok = "OK" if crc_calc == crc_recv else f"FAIL (calc=0x{crc_calc:04X})"
 
     type_name = TYPE_NAMES.get(frame_type, f"0x{frame_type:02X}")
     print(f"  type={type_name}  seq={counter}  flags=0x{flags:02X}  crc={crc_ok}")
     print(f"  dst=0x{dst:02X}  src=0x{src:02X}  enc_len={data_len}B")
 
-    if data_len < 21:  # min: 16(IV)+1(CT)+4(MIC)
+    if data_len < 21:
         print(f"  WARN: enc_len za mały ({data_len}B)")
         return
 
-    # Odszyfruj — enc_data to IV+CT+MIC jako latin-1 string
     enc_str = enc_data[:data_len].decode('latin-1')
     try:
         plaintext = crypto.decrypt(enc_str)
