@@ -11,6 +11,10 @@ def data_callback(data, rssi=None, index=None):
 
 
 radio_handler = RadioHandler(RADIO_MODE, data_callback)
+
+print(f"Radio mode: {radio_handler.mode}")
+print(f"FSK handler: {radio_handler.fsk_handler}")
+
 print("Czekam na dane...")
 
 try:
