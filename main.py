@@ -65,7 +65,7 @@ def data_callback(data, rssi=None, index=None):
     parse_frame(data)
 
 radio_handler = RadioHandler(RADIO_MODE, data_callback)
-print("Czekam na zaszyfrowane ramki BEKO...")
+print("Czekam na zaszyfrowane ramki BEKO... ")
 
 try:
     while True:
