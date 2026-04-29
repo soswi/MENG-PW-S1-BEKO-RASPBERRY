@@ -1,23 +1,19 @@
 from radio_handle import *
+from crypto_layer import CryptoLayer
 from time import sleep
 import struct
 
 RADIO_MODE = RadioMode.FSK
-SEND_MESSAGES = False
+AES_KEY = bytes.fromhex("AE6852F8121067CC4BF7A5765577F39E")
+crypto = CryptoLayer(AES_KEY)
 
 FRAME_TYPE_CMD   = 0x01
 FRAME_TYPE_TELEM = 0x02
 FRAME_TYPE_ALARM = 0x03
 FRAME_TYPE_ACK   = 0x04
-
-ADDR_CENTRAL = 0x01
-ADDR_NODE1   = 0x02
-
 TYPE_NAMES = {
-    FRAME_TYPE_CMD:   "CMD",
-    FRAME_TYPE_TELEM: "TELEM",
-    FRAME_TYPE_ALARM: "ALARM",
-    FRAME_TYPE_ACK:   "ACK",
+    FRAME_TYPE_CMD: "CMD", FRAME_TYPE_TELEM: "TELEM",
+    FRAME_TYPE_ALARM: "ALARM", FRAME_TYPE_ACK: "ACK",
 }
 
 def crc16(data: bytes) -> int:
@@ -32,39 +28,46 @@ def parse_frame(data: str):
     raw = bytes(ord(c) for c in data)
     print(f"  RAW ({len(raw)}B): {raw.hex().upper()}")
 
-    # beko_frame_t: type(1) counter(2) flags(1) data(8) data_len(1) crc(2) dst(1) src(1) = 17B
-    if len(raw) < 17:
-        print(f"  WARN: za krótka ramka ({len(raw)}B < 17B)")
+    # Nowa struktura: type(1)+counter(2)+flags(1)+data(64)+data_len(1)+crc(2)+dst(1)+src(1) = 73B
+    if len(raw) < 73:
+        print(f"  WARN: za krótka ramka ({len(raw)}B < 73B)")
         return
 
     frame_type = raw[0]
     counter    = struct.unpack_from('<H', raw, 1)[0]
     flags      = raw[3]
-    payload    = raw[4:12]
-    data_len   = raw[12]
-    crc_recv   = struct.unpack_from('<H', raw, 13)[0]
-    dst        = raw[15]
-    src        = raw[16]
+    enc_data   = raw[4:68]    # 64 bajty pola data
+    data_len   = raw[68]
+    crc_recv   = struct.unpack_from('<H', raw, 69)[0]
+    dst        = raw[71]
+    src        = raw[72]
 
     # Weryfikacja CRC
-    crc_calc = crc16(raw[:13])  # wszystko przed polem crc
+    crc_calc = crc16(raw[:69])
     crc_ok = "OK" if crc_calc == crc_recv else f"FAIL (calc=0x{crc_calc:04X})"
 
     type_name = TYPE_NAMES.get(frame_type, f"0x{frame_type:02X}")
-    payload_str = payload[:data_len].decode('ascii', errors='replace')
+    print(f"  type={type_name}  seq={counter}  flags=0x{flags:02X}  crc={crc_ok}")
+    print(f"  dst=0x{dst:02X}  src=0x{src:02X}  enc_len={data_len}B")
 
-    print(f"  type={type_name}  seq={counter}  flags=0x{flags:02X}")
-    print(f"  payload[{data_len}B]: {payload[:data_len].hex().upper()} = '{payload_str}'")
-    print(f"  crc=0x{crc_recv:04X}  {crc_ok}  dst=0x{dst:02X}  src=0x{src:02X}")
+    if data_len < 21:  # min: 16(IV)+1(CT)+4(MIC)
+        print(f"  WARN: enc_len za mały ({data_len}B)")
+        return
 
+    # Odszyfruj — enc_data to IV+CT+MIC jako latin-1 string
+    enc_str = enc_data[:data_len].decode('latin-1')
+    try:
+        plaintext = crypto.decrypt(enc_str)
+        print(f"  DECRYPT OK: '{plaintext.decode('ascii', errors='replace')}'")
+    except ValueError as e:
+        print(f"  DECRYPT FAIL: {e}")
 
 def data_callback(data, rssi=None, index=None):
-    print(f"\n--- Odebrano ramkę #{index} (RSSI: {rssi} dBm) ---")
+    print(f"\n--- Ramka #{index} (RSSI: {rssi} dBm) ---")
     parse_frame(data)
 
-
 radio_handler = RadioHandler(RADIO_MODE, data_callback)
-print("Czekam na ramki BEKO...")
+print("Czekam na zaszyfrowane ramki BEKO...")
 
 try:
     while True:
