@@ -56,7 +56,7 @@ class CryptoLayer:
 
         self.key = bytes(key)
         self.tx_counter = 0
-        self.rx_counter_last = 0xFFFFFFFF
+        self.rx_counter_last = -1
 
         print(f"INFO: Crypto initialized")
 
@@ -186,7 +186,7 @@ class CryptoLayer:
 
         # Weryfikacja replay
         counter = self._iv_to_counter(iv)
-        if counter <= self.rx_counter_last:
+        if self.rx_counter_last != -1 and counter <= self.rx_counter_last:
             print(f"ERROR: Replay attack detected! (ctr={counter}, last={self.rx_counter_last})")
             raise ValueError("Replay attack detected!")
 
