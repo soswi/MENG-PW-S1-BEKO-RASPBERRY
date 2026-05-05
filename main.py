@@ -5,7 +5,7 @@ from threading import Thread
 import struct
 
 # ============================================================
-TX_RX_TOGGLE = True   # True = TX, False = RX
+TX_RX_TOGGLE = False   # True = TX, False = RX
 # ============================================================
 
 AES_KEY      = bytes.fromhex("AE6852F8121067CC4BF7A5765577F39E")
