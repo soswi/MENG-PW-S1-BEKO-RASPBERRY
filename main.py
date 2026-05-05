@@ -7,6 +7,8 @@ RADIO_MODE = RadioMode.FSK
 AES_KEY = bytes.fromhex("AE6852F8121067CC4BF7A5765577F39E")
 crypto = CryptoLayer(AES_KEY)
 
+TX_RX_TOGGLE = True    # True = RPi nadaje, False = RPi odbiera
+
 FRAME_TYPE_CMD   = 0x01
 FRAME_TYPE_TELEM = 0x02
 FRAME_TYPE_ALARM = 0x03
@@ -63,9 +65,12 @@ def parse_frame(data: str):
 def data_callback(data, rssi=None, index=None):
     print(f"\n--- Ramka #{index} (RSSI: {rssi} dBm) ---")
     parse_frame(data)
-
-radio_handler = RadioHandler(RADIO_MODE, data_callback)
-print("Czekam na zaszyfrowane ramki BEKO... ")
+if TX_RX_TOGGLE:
+    # ... send_loop
+    pass
+else:
+    radio_handler = RadioHandler(RADIO_MODE, data_callback)
+    print("Czekam na zaszyfrowane ramki BEKO... ")
 
 try:
     while True:
