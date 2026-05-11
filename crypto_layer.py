@@ -1,263 +1,241 @@
 """
-============================================================================
 crypto_layer.py
-============================================================================
-Moduł szyfrowania dla systemu BEKO (Raspberry Pi)
+===============
+AES-128-CTR + HMAC-SHA256 cryptographic layer for BEKO radio protocol.
 
-Kompatybilny z interfejsem klasy FSK:
-    encrypted_msg = crypto.encrypt(message)
-    message = crypto.decrypt(encrypted_msg)
+Compatible with STM32 CMOX implementation — identical algorithm, identical
+wire format.  Both sides must use the same AES_KEY from beko_protocol.py.
 
-Wewnętrznie:
-    - AES-128-CTR (pycryptodome)
-    - HMAC-SHA256[:4] (authentication)
-    - Replay protection (frame counter)
+Wire format of the encrypted blob (always 32 bytes):
+    data[0:16]   IV          — 16 bytes
+    data[16:28]  Ciphertext  — 12 bytes (AES-128-CTR of 12-byte plaintext)
+    data[28:32]  MIC         — 4 bytes (first 4 bytes of HMAC-SHA256)
 
-Frame format (na radio):
-    [IV: 16B] [Ciphertext: len(message)] [MIC: 4B]
+Verification order (CRITICAL — do not change):
+    1. Verify HMAC
+    2. Replay-window check (extract counter from IV plaintext)
+    3. AES-CTR decrypt
 
-Konwersja radio_handle:
-    - send:    bytes → str (przez chr()) przed wysłaniem
-    - receive: str → bytes (przez ord()) po odebraniu
-    Crypto layer obsługuje obie konwersje transparentnie.
+Data is never decrypted before authentication.
 
-============================================================================
+Counter / replay-window rules (matching STM32):
+    - Sentinel rx_counter_last = 0xFFFFFFFF → accept any first frame
+    - After first frame: accept if 1 ≤ delta ≤ 15
+      where delta = (received_counter − last_accepted) mod 2^32
+    - Counter is a 32-bit value encoded big-endian in IV bytes 0–3
+
+Interface:
+    crypto = CryptoLayer(key)
+    encrypted_bytes = crypto.encrypt(plaintext_bytes)   # bytes → bytes
+    plaintext_bytes = crypto.decrypt(encrypted_bytes)   # bytes → bytes
+
+radio_handle.py passes and returns str (latin-1 encoded bytes).
+The conversion happens in radio_controller.py, NOT here.
+CryptoLayer works only with bytes internally.
 """
 
-from Crypto.Cipher import AES
-from Crypto.Hash import HMAC, SHA256
 import struct
+from Crypto.Cipher import AES
+from Crypto.Hash  import HMAC, SHA256
+
+from beko_protocol import AES_KEY, BEKO_PAYLOAD_SIZE, ENCRYPTED_SIZE
+
+
+CRYPTO_IV_SIZE  = 16
+CRYPTO_MIC_SIZE = 4
+# CT size = BEKO_PAYLOAD_SIZE = 12
+# Encrypted blob = IV(16) + CT(12) + MIC(4) = 32
 
 
 class CryptoLayer:
     """
-    Moduł szyfrowania: AES-128-CTR + HMAC-SHA256
+    AES-128-CTR + HMAC-SHA256 encryption/decryption.
 
-    Interfejs kompatybilny z radio_handle (FSK/LoRa):
-        encrypted_str = crypto.encrypt(plaintext)   # zwraca str dla radio_handle.send()
-        plaintext_str = crypto.decrypt(encoded_str) # przyjmuje str z data_callback
+    One instance per session.  Do not re-instantiate mid-session — it
+    resets the counters and breaks replay protection.
     """
 
-    CRYPTO_KEY_SIZE = 16
-    CRYPTO_MIC_SIZE = 4
-    CRYPTO_MAX_DATA = 256
-
-    def __init__(self, key):
-        """
-        Inicjalizacja warstwy kryptografii
-
-        Args:
-            key: 16-bajtowy klucz AES-128 (bytes)
-        """
+    def __init__(self, key: bytes = AES_KEY):
         if not isinstance(key, (bytes, bytearray)):
-            raise TypeError("Key must be bytes")
-        if len(key) != self.CRYPTO_KEY_SIZE:
-            raise ValueError(f"Key must be {self.CRYPTO_KEY_SIZE} bytes")
+            raise TypeError("key must be bytes")
+        if len(key) != 16:
+            raise ValueError("key must be exactly 16 bytes (AES-128)")
 
-        self.key = bytes(key)
-        self.tx_counter = 0
-        self.rx_counter_last = -1
-
-        print(f"INFO: Crypto initialized")
+        self._key = bytes(key)
+        self.tx_counter      = 0
+        self.rx_counter_last = 0xFFFFFFFF  # sentinel: accept any first frame
 
     # ------------------------------------------------------------------ #
-    #  Helpers: konwersja str <-> bytes (kompatybilność z radio_handle)   #
+    # IV helpers                                                          #
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _bytes_to_radio_str(data: bytes) -> str:
-        """
-        Konwertuj bytes → str w sposób kompatybilny z radio_handle.
-        radio_handle.handle_received_data robi: chr(elem) for elem in data
-        Więc send musi dostarczyć coś co po tej konwersji da oryginalne bajty.
-        Używamy latin-1: bajt N → chr(N), odwracalne przez ord(c).
-        """
-        return data.decode('latin-1')
-
-    @staticmethod
-    def _radio_str_to_bytes(data: str) -> bytes:
-        """
-        Konwertuj str → bytes — odwrócenie konwersji z handle_received_data.
-        handle_received_data: ''.join(chr(elem) for elem in raw_bytes)
-        Odwrócenie:           bytes(ord(c) for c in string)
-        """
-        return bytes(ord(c) for c in data)
-
-    # ------------------------------------------------------------------ #
-    #  Wewnętrzna kryptografia                                            #
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _counter_to_iv(counter):
-        """IV = [counter (4B big-endian)] + [zeros (12B)]"""
+    def _counter_to_iv(counter: int) -> bytes:
+        """IV = counter (4 B big-endian) + 12 zero bytes."""
         return struct.pack('>I', counter & 0xFFFFFFFF) + b'\x00' * 12
 
     @staticmethod
-    def _iv_to_counter(iv):
+    def _iv_to_counter(iv: bytes) -> int:
         return struct.unpack('>I', iv[:4])[0]
 
-    def _compute_hmac(self, iv, ciphertext):
-        """HMAC-SHA256(IV || ciphertext)[:4]"""
-        hmac = HMAC.new(self.key, digestmod=SHA256)
-        hmac.update(iv)
-        hmac.update(ciphertext)
-        return hmac.digest()[:self.CRYPTO_MIC_SIZE]
-
     # ------------------------------------------------------------------ #
-    #  Publiczny interfejs                                                 #
+    # HMAC                                                                #
     # ------------------------------------------------------------------ #
 
-    def encrypt(self, plaintext) -> str:
+    def _compute_mic(self, iv: bytes, ciphertext: bytes) -> bytes:
+        h = HMAC.new(self._key, digestmod=SHA256)
+        h.update(iv)
+        h.update(ciphertext)
+        return h.digest()[:CRYPTO_MIC_SIZE]
+
+    # ------------------------------------------------------------------ #
+    # Public interface                                                    #
+    # ------------------------------------------------------------------ #
+
+    def encrypt(self, plaintext: bytes) -> bytes:
         """
-        Szyfruj dane i zwróć str gotowy do radio_handle.send().
+        Encrypt exactly BEKO_PAYLOAD_SIZE (12) bytes of plaintext.
 
         Args:
-            plaintext: dane do szyfrowania (bytes, bytearray lub str)
+            plaintext: 12 bytes of payload (zero-padded by caller)
 
         Returns:
-            str: zaszyfrowana ramka zakodowana jako latin-1 string
-                 Format wewnętrzny: [IV (16B)] + [ciphertext (N)] + [MIC (4B)]
+            bytes: 32-byte encrypted blob (IV + CT + MIC)
 
         Raises:
-            ValueError: jeśli dane są za duże
+            ValueError: if plaintext is not exactly 12 bytes
         """
-        # Normalizacja wejścia
-        if isinstance(plaintext, str):
-            plaintext = plaintext.encode('utf-8')
-        else:
-            plaintext = bytes(plaintext)
+        if not isinstance(plaintext, (bytes, bytearray)):
+            raise TypeError("plaintext must be bytes")
+        if len(plaintext) != BEKO_PAYLOAD_SIZE:
+            raise ValueError(
+                f"plaintext must be exactly {BEKO_PAYLOAD_SIZE} bytes "
+                f"(use build_cmd_payload / build_ack_payload), got {len(plaintext)}"
+            )
 
-        if len(plaintext) == 0 or len(plaintext) > self.CRYPTO_MAX_DATA:
-            raise ValueError(f"Plaintext must be 1-{self.CRYPTO_MAX_DATA} bytes")
-
-        # Szyfrowanie
-        iv = self._counter_to_iv(self.tx_counter)
-        cipher = AES.new(self.key, AES.MODE_CTR, nonce=iv[:8])
-        ciphertext = cipher.encrypt(plaintext)
-        mic = self._compute_hmac(iv, ciphertext)
+        iv         = self._counter_to_iv(self.tx_counter)
+        cipher     = AES.new(self._key, AES.MODE_CTR, nonce=iv[:8])
+        ciphertext = cipher.encrypt(bytes(plaintext))
+        mic        = self._compute_mic(iv, ciphertext)
 
         self.tx_counter = (self.tx_counter + 1) & 0xFFFFFFFF
 
-        encrypted_bytes = iv + ciphertext + mic
+        result = iv + ciphertext + mic
+        assert len(result) == ENCRYPTED_SIZE
+        return result
 
-        print(f"ENCRYPT: {len(plaintext)} bytes → {len(encrypted_bytes)} bytes "
-              f"(ctr={self.tx_counter - 1})")
-
-        # Zwróć jako str gotowy dla radio_handle.send()
-        return self._bytes_to_radio_str(encrypted_bytes)
-
-    def decrypt(self, encrypted_msg) -> bytes:
+    def decrypt(self, encrypted: bytes) -> bytes:
         """
-        Odszyfruj dane z radio_handle data_callback.
+        Decrypt a 32-byte encrypted blob received from STM32.
+
+        Verification order: HMAC → replay window → AES decrypt.
 
         Args:
-            encrypted_msg: str z data_callback (latin-1 encoded)
-                           lub bytes (dla bezpośredniego użycia)
+            encrypted: 32 bytes (IV + CT + MIC) from BekoFrame.data
 
         Returns:
-            bytes: odszyfrowane dane
+            bytes: 12-byte plaintext
 
         Raises:
-            ValueError: jeśli HMAC verification failed lub replay attack
+            ValueError: HMAC failure, replay/window violation, or bad length
         """
-        # Normalizacja wejścia — obsługa str z radio_handle
-        if isinstance(encrypted_msg, str):
-            encrypted_msg = self._radio_str_to_bytes(encrypted_msg)
-        else:
-            encrypted_msg = bytes(encrypted_msg)
-
-        # Min: 16 (IV) + 1 (min CT) + 4 (MIC) = 21 bajtów
-        if len(encrypted_msg) < 21:
+        if not isinstance(encrypted, (bytes, bytearray)):
+            raise TypeError("encrypted must be bytes")
+        if len(encrypted) != ENCRYPTED_SIZE:
             raise ValueError(
-                f"Encrypted message too short: {len(encrypted_msg)} bytes (min 21)")
+                f"encrypted blob must be exactly {ENCRYPTED_SIZE} bytes, "
+                f"got {len(encrypted)}"
+            )
 
-        # Rozpakuj
-        iv = encrypted_msg[:16]
-        mic = encrypted_msg[-4:]
-        ciphertext = encrypted_msg[16:-4]
+        iv         = encrypted[:CRYPTO_IV_SIZE]
+        mic        = encrypted[-CRYPTO_MIC_SIZE:]
+        ciphertext = encrypted[CRYPTO_IV_SIZE:-CRYPTO_MIC_SIZE]
 
-        # Weryfikacja HMAC
-        computed_mic = self._compute_hmac(iv, ciphertext)
+        # 1. Verify HMAC — before anything else
+        computed_mic = self._compute_mic(iv, ciphertext)
         if computed_mic != mic:
-            print(f"ERROR: HMAC verification failed!")
-            print(f"  Computed: {computed_mic.hex().upper()}")
-            print(f"  Received: {mic.hex().upper()}")
-            raise ValueError("HMAC verification failed - tampering detected!")
+            raise ValueError(
+                f"HMAC verification failed — tampering detected "
+                f"(computed={computed_mic.hex()} received={mic.hex()})"
+            )
 
-        # Weryfikacja replay
+        # 2. Replay-window check
+        #    Sentinel 0xFFFFFFFF means first frame — accept any counter.
+        #    After that: 1 ≤ delta ≤ 15
         counter = self._iv_to_counter(iv)
-        if self.rx_counter_last != -1 and counter <= self.rx_counter_last:
-            print(f"ERROR: Replay attack detected! (ctr={counter}, last={self.rx_counter_last})")
-            raise ValueError("Replay attack detected!")
+        if self.rx_counter_last != 0xFFFFFFFF:
+            delta = (counter - self.rx_counter_last) & 0xFFFFFFFF
+            if delta == 0 or delta > 15:
+                raise ValueError(
+                    f"Replay/window check failed "
+                    f"(ctr={counter}, last={self.rx_counter_last}, delta={delta})"
+                )
 
-        # Odszyfrowanie
-        cipher = AES.new(self.key, AES.MODE_CTR, nonce=iv[:8])
+        # 3. AES-128-CTR decrypt
+        cipher    = AES.new(self._key, AES.MODE_CTR, nonce=iv[:8])
         plaintext = cipher.decrypt(ciphertext)
 
         self.rx_counter_last = counter
-
-        print(f"DECRYPT: {len(ciphertext)} bytes → {len(plaintext)} bytes, ctr={counter}")
-
         return plaintext
 
-    def self_test(self):
-        """Prosty self-test"""
+    # ------------------------------------------------------------------ #
+    # Self-test                                                           #
+    # ------------------------------------------------------------------ #
+
+    def self_test(self) -> bool:
+        """
+        Verify encrypt→decrypt roundtrip, tampering detection, and
+        replay detection.  Called once on startup.
+
+        Returns:
+            True on success, raises AssertionError on failure.
+        """
         print("\n=== CRYPTO SELF-TEST ===")
 
-        key = bytes.fromhex("AE6852F8121067CC4BF7A5765577F39E")
-        plaintext = b'Test message!!!!'
+        from beko_frame import build_cmd_payload
+        from beko_protocol import CMD_OP_ABSOLUTE
 
-        crypto = CryptoLayer(key)
+        crypto = CryptoLayer(self._key)
+        payload = build_cmd_payload(CMD_OP_ABSOLUTE, 90)   # 12 bytes
 
-        print("[1] Encrypt → str...")
-        encrypted_str = crypto.encrypt(plaintext)
-        assert isinstance(encrypted_str, str), "encrypt() powinno zwracać str"
-        print(f"    Typ: {type(encrypted_str)}, długość: {len(encrypted_str)}")
+        # [1] Encrypt
+        enc = crypto.encrypt(payload)
+        assert len(enc) == ENCRYPTED_SIZE, f"enc len {len(enc)}"
+        assert isinstance(enc, bytes)
+        print(f"  [1] encrypt OK — {len(enc)} bytes")
 
-        print("[2] Decrypt ← str...")
-        decrypted = crypto.decrypt(encrypted_str)
+        # [2] Decrypt
+        dec = crypto.decrypt(enc)
+        assert dec == payload, f"roundtrip mismatch\n  orig={payload.hex()}\n  dec={dec.hex()}"
+        print("  [2] decrypt roundtrip OK")
 
-        print("[3] Compare...")
-        if plaintext == decrypted:
-            print("✓ SUCCESS: encrypt→decrypt roundtrip OK")
-        else:
-            print(f"✗ FAILED\n  Original:  {plaintext}\n  Decrypted: {decrypted}")
-            return False
-
-        print("[4] Tampering detection...")
-        # Zepsuj MIC w stringu
-        b = bytearray(encrypted_str.encode('latin-1'))
-        b[-4] ^= 0xFF
-        tampered_str = b.decode('latin-1')
+        # [3] Tampering detection — flip one MIC byte
+        tampered = bytearray(enc)
+        tampered[-1] ^= 0xFF
         try:
-            crypto.decrypt(tampered_str)
-            print("✗ Powinno wykryć manipulację")
-            return False
+            crypto.decrypt(bytes(tampered))
+            raise AssertionError("should have raised ValueError on tampered MIC")
         except ValueError as e:
-            if "HMAC" in str(e):
-                print("✓ Tampering detected")
-            else:
-                print(f"✗ Zły błąd: {e}")
-                return False
+            assert "HMAC" in str(e), f"unexpected error: {e}"
+        print("  [3] tampering detection OK")
 
-        print("[5] Replay detection...")
-        crypto.encrypt(b'Another msg!!!!!')
+        # [4] Replay detection — re-decrypt already-accepted frame
+        #     Need a fresh counter state: encrypt a second frame, then
+        #     try to replay the first one (counter too small).
+        crypto2 = CryptoLayer(self._key)
+        enc_a = crypto2.encrypt(build_cmd_payload(CMD_OP_ABSOLUTE, 10))
+        enc_b = crypto2.encrypt(build_cmd_payload(CMD_OP_ABSOLUTE, 20))
+        crypto2.decrypt(enc_b)   # accept counter=1
         try:
-            crypto.decrypt(encrypted_str)
-            print("✗ Powinno wykryć replay")
-            return False
+            crypto2.decrypt(enc_a)  # replay counter=0 → delta=0xFFFFFFFF > 15
+            raise AssertionError("should have raised ValueError on replay")
         except ValueError as e:
-            if "Replay" in str(e):
-                print("✓ Replay detected")
-            else:
-                print(f"✗ Zły błąd: {e}")
-                return False
+            assert "Replay" in str(e) or "window" in str(e), f"unexpected error: {e}"
+        print("  [4] replay detection OK")
 
-        print("\n=== ALL TESTS PASSED ===\n")
+        print("=== ALL CRYPTO TESTS PASSED ===\n")
         return True
 
 
 if __name__ == "__main__":
-    key = bytes.fromhex("AE6852F8121067CC4BF7A5765577F39E")
-    crypto = CryptoLayer(key)
-    crypto.self_test()
+    CryptoLayer().self_test()
