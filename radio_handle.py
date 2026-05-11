@@ -2,24 +2,6 @@
 MIT License
 
 Copyright (c) 2024 BEER-TEAM (Piotr Polnau, Jan Sosulski, Piotr Baprawski)
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 """
 
 from pyLoraRFM9x import LoRa, ModemConfig
@@ -30,14 +12,13 @@ from enum import Enum, auto
 from time import sleep
 
 
-class RadioMode(Enum):
-    """
-    Enum class for Radio Modes: FSK and LoRa.
+# Air time for one 41-byte BEKO frame at 4800 bps:
+#   (1 length byte + 41 payload + 2 CRC) * 8 bits / 4800 bps ≈ 73 ms
+# Add margin for preamble and PLL settling.
+_FSK_FRAME_AIR_TIME_S = 0.130
 
-    Possible values:
-    FSK: Frequency Shift Keying
-    LORA: LoRa
-    """
+
+class RadioMode(Enum):
     FSK  = auto()
     LORA = auto()
 
@@ -47,12 +28,6 @@ class RadioMode(Enum):
 
 class RadioHandler:
     def __init__(self, mode, data_callback):
-        """
-        Initialize the RadioHandler with SPI/GPIO and start receiving.
-
-        :param mode:          RadioMode.FSK or RadioMode.LORA
-        :param data_callback: Called with (data_str, rssi, index) on RX
-        """
         GPIO.setmode(GPIO.BCM)
         self.mode          = mode
         self.data_callback = data_callback
@@ -90,21 +65,34 @@ class RadioHandler:
             self.lora_handler.set_mode_rx()
 
         else:
-            raise ValueError("Invalid mode. Please choose 'fsk' or 'lora'.")
+            raise ValueError("Invalid mode. Choose 'fsk' or 'lora'.")
 
         print(f"{self.mode} handler is running... Waiting for data.")
 
     # ------------------------------------------------------------------ #
 
     def start_rx(self):
-        """Switch radio back to continuous receive mode."""
+        """
+        Switch SX1276 to FSK RX continuous mode.
+
+        SX1276 datasheet requires TX → STDBY → RX, not TX → RX directly.
+        Skipping STDBY causes the PLL to stall in FSRX (0x04) and never
+        reach RX continuous (0x05).  We also flush any stale PayloadReady
+        by going through set_mode_idle() (STDBY) first.
+        """
         if self.mode == RadioMode.FSK:
+            # Step 1: STDBY — required intermediate state per SX1276 datasheet.
+            # Also resets the internal mode flag so set_mode_rx_fsk() guard passes.
+            self.fsk_handler.set_mode_idle()
+            sleep(0.005)   # 5 ms for PLL to settle in STDBY
+
+            # Step 2: Re-arm RX (configures DIO mapping + starts RX continuous)
             self.fsk_handler.SX1276SetRx_fsk()
+
         elif self.mode == RadioMode.LORA:
             self.lora_handler.set_mode_rx()
 
     def handle_received_data(self, data, rssi=None, index=None):
-        """Decode raw bytes from driver and forward to data_callback."""
         if self.mode == RadioMode.FSK:
             if data:
                 decoded = ''.join(chr(b) for b in data)
@@ -112,7 +100,6 @@ class RadioHandler:
                 self.data_callback(decoded, rssi, index)
             else:
                 print("Received empty or noise data.")
-
         elif self.mode == RadioMode.LORA:
             int_data = [int(b) for b in data.message]
             int_data.insert(0, data.header_flags)
@@ -125,26 +112,22 @@ class RadioHandler:
 
     def send(self, message):
         """
-        Transmit a message and return only after the radio has finished
-        sending and is back in RX mode.
+        Transmit message then return to RX via STDBY.
 
-        For FSK @ 4800 bps a 41-byte frame takes ~86 ms on air.
-        We call wait_packet_sent() (polls up to 1 s for TX-done interrupt)
-        instead of a fixed sleep so we return as soon as TX is actually done.
+        Sequence: TX → wait air time → STDBY → RX continuous.
+        The STDBY step is mandatory for SX1276 PLL to re-lock on RX freq.
         """
         if self.mode == RadioMode.FSK:
             self._send_fsk(message)
-            # Wait for TX-done interrupt (DIO1 → _handle_interrupt sets
-            # self._mode back out of MODE_TX).  Timeout = 1 s (driver default).
-            sent = self.fsk_handler.wait_packet_sent()
-            if not sent:
-                print("WARNING: wait_packet_sent() timed out — forcing RX")
-            self.start_rx()
+            # Wait for frame to finish transmitting before switching modes.
+            # 130 ms covers 73 ms air time + preamble + margin.
+            sleep(_FSK_FRAME_AIR_TIME_S)
+            self.start_rx()   # goes through STDBY internally
 
         elif self.mode == RadioMode.LORA:
             self._send_lora(message)
             sleep(0.1)
-            self.start_rx()
+            self.lora_handler.set_mode_rx()
 
     def _send_fsk(self, message):
         print(f"Sending FSK message: {message}")
