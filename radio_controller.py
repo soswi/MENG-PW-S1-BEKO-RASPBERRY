@@ -283,6 +283,7 @@ class RadioController:
     # ------------------------------------------------------------------ #
 
     def _on_received(self, data: str, rssi=None, index=None):
+        print(f"DBG _on_received: {len(data)}B rssi={rssi}")
         """
         Called by RadioHandler on every received FSK packet.
         data is a latin-1 str; convert back to bytes with ord().
@@ -296,14 +297,17 @@ class RadioController:
             log.warning(f"RX parse error: {e}  raw={raw.hex()}")
             return
 
+        print(f"DBG parsed: type=0x{frame.type:02X} dst=0x{frame.dst:02X} src=0x{frame.src:02X} flags=0x{frame.flags:02X}")
+
         # Drop frames not addressed to us
         if frame.dst != ADDR_CENTRAL:
-            log.debug(f"RX ignored: dst=0x{frame.dst:02X}")
+            print(f"DBG ignored: dst=0x{frame.dst:02X} != ADDR_CENTRAL=0x{ADDR_CENTRAL:02X}")
             return
 
         try:
             frame.plaintext = self._crypto.decrypt(frame.data)
         except ValueError as e:
+            print(f"DBG crypto error: {e}")
             log.warning(f"RX crypto error: {e}")
             return
 
