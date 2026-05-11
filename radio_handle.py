@@ -10,12 +10,24 @@ import RPi.GPIO as GPIO
 import radio_defines
 from enum import Enum, auto
 from time import sleep
+import spidev as _spidev
 
-
-# Air time for one 41-byte BEKO frame at 4800 bps:
-#   (1 length byte + 41 payload + 2 CRC) * 8 bits / 4800 bps ≈ 73 ms
-# Add margin for preamble and PLL settling.
+# Air time for one 41-byte BEKO frame at 4800 bps ≈ 73 ms + margin
 _FSK_FRAME_AIR_TIME_S = 0.130
+
+# SX1276 registers needed for manual FIFO flush
+_REG_01_OP_MODE   = 0x01
+_REG_00_FIFO      = 0x00
+_REG_0D_RXCONFIG  = 0x0D
+_REG_13_IRQ2      = 0x13
+
+_RF_OPMODE_MASK   = 0xF8
+_MODE_SLEEP       = 0x00
+_MODE_STDBY       = 0x01
+_MODE_RXCONT      = 0x05   # FSK RX continuous (without LoRa bit)
+
+# RestartRxWithPllLock bit in RegRxConfig
+_RF_RESTART_RX_WITH_PLL = 0x20
 
 
 class RadioMode(Enum):
@@ -45,8 +57,12 @@ class RadioHandler:
                 fixLEN=radio_defines.FSK_FIX_LEN,
                 payload_len=radio_defines.FSK_PAYLOAD_LEN,
             )
+            # Keep a direct SPI reference for register-level operations
+            # (same bus/channel as the driver uses)
+            self._spi = self.fsk_handler.spi
+
             self.fsk_handler.on_recv = self.handle_received_data
-            self.fsk_handler.SX1276SetRx_fsk()
+            self._enter_rx()
 
         elif self.mode == RadioMode.LORA:
             self.lora_handler = LoRa(
@@ -70,25 +86,55 @@ class RadioHandler:
         print(f"{self.mode} handler is running... Waiting for data.")
 
     # ------------------------------------------------------------------ #
+    # Internal helpers                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _spi_r(self, reg):
+        return self._spi.xfer([reg & 0x7F, 0x00])[1]
+
+    def _spi_w(self, reg, val):
+        self._spi.xfer([reg | 0x80, val])
+
+    def _enter_rx(self):
+        """
+        Proper TX→RX (or any→RX) sequence for SX1276 FSK mode.
+
+        Per SX1276 datasheet section 4.2.5:
+          1. Go to STDBY (required intermediate state — PLL re-locks here)
+          2. Wait for PLL to settle
+          3. Issue RestartRx to flush FIFO and clear PayloadReady
+          4. Go to RX continuous
+
+        Skipping STDBY causes the chip to stall in FSRX (0x04).
+        Not flushing FIFO keeps PayloadReady=True which prevents new
+        interrupts from firing on DIO0.
+        """
+        with self.fsk_handler._hw_lock:
+            # 1. STDBY
+            self._spi_w(_REG_01_OP_MODE, _MODE_STDBY)
+            self.fsk_handler._mode = 0x01  # MODE_STDBY
+            sleep(0.010)  # 10 ms — PLL settling time per datasheet
+
+            # 2. Flush FIFO: RestartRxWithPllLock clears FIFO and
+            #    deasserts PayloadReady without leaving RX mode.
+            #    Write to RegRxConfig bit 5.
+            rxcfg = self._spi_r(_REG_0D_RXCONFIG)
+            self._spi_w(_REG_0D_RXCONFIG, rxcfg | _RF_RESTART_RX_WITH_PLL)
+            sleep(0.005)
+
+        # 3. Full RX re-arm via driver (sets DIO mapping + RX continuous)
+        self.fsk_handler.SX1276SetRx_fsk()
+
+        # 4. Verify
+        mode = self._spi_r(_REG_01_OP_MODE)
+        irq2 = self._spi_r(_REG_13_IRQ2)
+        print(f"  [RX] mode=0x{mode:02X}  PayloadReady={bool(irq2 & 0x04)}")
+
+    # ------------------------------------------------------------------ #
 
     def start_rx(self):
-        """
-        Switch SX1276 to FSK RX continuous mode.
-
-        SX1276 datasheet requires TX → STDBY → RX, not TX → RX directly.
-        Skipping STDBY causes the PLL to stall in FSRX (0x04) and never
-        reach RX continuous (0x05).  We also flush any stale PayloadReady
-        by going through set_mode_idle() (STDBY) first.
-        """
         if self.mode == RadioMode.FSK:
-            # Step 1: STDBY — required intermediate state per SX1276 datasheet.
-            # Also resets the internal mode flag so set_mode_rx_fsk() guard passes.
-            self.fsk_handler.set_mode_idle()
-            sleep(0.005)   # 5 ms for PLL to settle in STDBY
-
-            # Step 2: Re-arm RX (configures DIO mapping + starts RX continuous)
-            self.fsk_handler.SX1276SetRx_fsk()
-
+            self._enter_rx()
         elif self.mode == RadioMode.LORA:
             self.lora_handler.set_mode_rx()
 
@@ -112,18 +158,12 @@ class RadioHandler:
 
     def send(self, message):
         """
-        Transmit message then return to RX via STDBY.
-
-        Sequence: TX → wait air time → STDBY → RX continuous.
-        The STDBY step is mandatory for SX1276 PLL to re-lock on RX freq.
+        TX → wait for air time → STDBY → RX.
         """
         if self.mode == RadioMode.FSK:
             self._send_fsk(message)
-            # Wait for frame to finish transmitting before switching modes.
-            # 130 ms covers 73 ms air time + preamble + margin.
             sleep(_FSK_FRAME_AIR_TIME_S)
-            self.start_rx()   # goes through STDBY internally
-
+            self._enter_rx()
         elif self.mode == RadioMode.LORA:
             self._send_lora(message)
             sleep(0.1)
