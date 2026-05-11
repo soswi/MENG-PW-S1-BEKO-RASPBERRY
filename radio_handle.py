@@ -10,24 +10,17 @@ import RPi.GPIO as GPIO
 import radio_defines
 from enum import Enum, auto
 from time import sleep
-import spidev as _spidev
 
-# Air time for one 41-byte BEKO frame at 4800 bps ≈ 73 ms + margin
 _FSK_FRAME_AIR_TIME_S = 0.130
 
-# SX1276 registers needed for manual FIFO flush
-_REG_01_OP_MODE   = 0x01
-_REG_00_FIFO      = 0x00
-_REG_0D_RXCONFIG  = 0x0D
-_REG_13_IRQ2      = 0x13
+_REG_01_OP_MODE  = 0x01
+_REG_00_FIFO     = 0x00
+_REG_0D_RXCONFIG = 0x0D
+_REG_13_IRQ2     = 0x13
+_REG_3F_FIFOTHRESH = 0x3F   # wait for FifoEmpty using FifoLevel if needed
 
-_RF_OPMODE_MASK   = 0xF8
-_MODE_SLEEP       = 0x00
-_MODE_STDBY       = 0x01
-_MODE_RXCONT      = 0x05   # FSK RX continuous (without LoRa bit)
-
-# RestartRxWithPllLock bit in RegRxConfig
-_RF_RESTART_RX_WITH_PLL = 0x20
+_MODE_SLEEP = 0x00
+_MODE_STDBY = 0x01
 
 
 class RadioMode(Enum):
@@ -57,10 +50,7 @@ class RadioHandler:
                 fixLEN=radio_defines.FSK_FIX_LEN,
                 payload_len=radio_defines.FSK_PAYLOAD_LEN,
             )
-            # Keep a direct SPI reference for register-level operations
-            # (same bus/channel as the driver uses)
             self._spi = self.fsk_handler.spi
-
             self.fsk_handler.on_recv = self.handle_received_data
             self._enter_rx()
 
@@ -86,8 +76,6 @@ class RadioHandler:
         print(f"{self.mode} handler is running... Waiting for data.")
 
     # ------------------------------------------------------------------ #
-    # Internal helpers                                                     #
-    # ------------------------------------------------------------------ #
 
     def _spi_r(self, reg):
         return self._spi.xfer([reg & 0x7F, 0x00])[1]
@@ -95,40 +83,44 @@ class RadioHandler:
     def _spi_w(self, reg, val):
         self._spi.xfer([reg | 0x80, val])
 
+    def _flush_fifo(self):
+        """
+        Drain FIFO by reading bytes until PayloadReady clears.
+        PayloadReady (RegIrqFlags2 bit 2) is read-only — it clears only
+        when the entire packet has been read from FIFO.
+        We read up to 256 bytes to guarantee the FIFO is empty.
+        """
+        for _ in range(256):
+            irq2 = self._spi_r(_REG_13_IRQ2)
+            if not (irq2 & 0x04):   # PayloadReady cleared
+                break
+            self._spi_r(_REG_00_FIFO)   # read one byte
+
     def _enter_rx(self):
         """
-        Proper TX→RX (or any→RX) sequence for SX1276 FSK mode.
-
-        Per SX1276 datasheet section 4.2.5:
-          1. Go to STDBY (required intermediate state — PLL re-locks here)
-          2. Wait for PLL to settle
-          3. Issue RestartRx to flush FIFO and clear PayloadReady
-          4. Go to RX continuous
-
-        Skipping STDBY causes the chip to stall in FSRX (0x04).
-        Not flushing FIFO keeps PayloadReady=True which prevents new
-        interrupts from firing on DIO0.
+        Proper sequence to enter FSK RX continuous:
+          1. STDBY  — mandatory intermediate state (SX1276 datasheet §4.2.5)
+          2. Flush FIFO — drain stale bytes so PayloadReady deasserts
+          3. SX1276SetRx_fsk() — sets DIO mapping and starts RX continuous
         """
         with self.fsk_handler._hw_lock:
             # 1. STDBY
             self._spi_w(_REG_01_OP_MODE, _MODE_STDBY)
-            self.fsk_handler._mode = 0x01  # MODE_STDBY
-            sleep(0.010)  # 10 ms — PLL settling time per datasheet
+            self.fsk_handler._mode = _MODE_STDBY
+            sleep(0.010)
 
-            # 2. Flush FIFO: RestartRxWithPllLock clears FIFO and
-            #    deasserts PayloadReady without leaving RX mode.
-            #    Write to RegRxConfig bit 5.
-            rxcfg = self._spi_r(_REG_0D_RXCONFIG)
-            self._spi_w(_REG_0D_RXCONFIG, rxcfg | _RF_RESTART_RX_WITH_PLL)
-            sleep(0.005)
+            # 2. Drain FIFO
+            self._flush_fifo()
 
-        # 3. Full RX re-arm via driver (sets DIO mapping + RX continuous)
+        irq2 = self._spi_r(_REG_13_IRQ2)
+        print(f"  [RX pre-arm] STDBY ok  PayloadReady={bool(irq2 & 0x04)}")
+
+        # 3. Re-arm RX via driver
         self.fsk_handler.SX1276SetRx_fsk()
 
-        # 4. Verify
         mode = self._spi_r(_REG_01_OP_MODE)
         irq2 = self._spi_r(_REG_13_IRQ2)
-        print(f"  [RX] mode=0x{mode:02X}  PayloadReady={bool(irq2 & 0x04)}")
+        print(f"  [RX armed]   mode=0x{mode:02X}  PayloadReady={bool(irq2 & 0x04)}")
 
     # ------------------------------------------------------------------ #
 
@@ -157,9 +149,6 @@ class RadioHandler:
             self.data_callback(decoded, data.rssi)
 
     def send(self, message):
-        """
-        TX → wait for air time → STDBY → RX.
-        """
         if self.mode == RadioMode.FSK:
             self._send_fsk(message)
             sleep(_FSK_FRAME_AIR_TIME_S)
