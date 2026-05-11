@@ -38,7 +38,7 @@ log = logging.getLogger("beko.radio")
 # How long to wait after radio_handle.send() before entering the RX wait loop.
 # radio_handle does sleep(0.1) + start_rx() internally, so we need a bit more
 # to ensure the FSK receiver is back in RX mode before STM32 transmits TELEM.
-_POST_TX_RX_SETTLE_S = 0.15
+_POST_TX_RX_SETTLE_S = 0.05
 
 
 class _State:

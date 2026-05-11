@@ -1,4 +1,4 @@
-"""""
+"""
 MIT License
 
 Copyright (c) 2024 BEER-TEAM (Piotr Polnau, Jan Sosulski, Piotr Baprawski)
@@ -22,14 +22,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-
 from pyLoraRFM9x import LoRa, ModemConfig
-from sx_1276_driver.radio_driver import FSK  # Import your FSK driver
+from sx_1276_driver.radio_driver import FSK
 import RPi.GPIO as GPIO
 import radio_defines
 from enum import Enum, auto
 from time import sleep
-from threading import Thread
 
 
 class RadioMode(Enum):
@@ -37,31 +35,29 @@ class RadioMode(Enum):
     Enum class for Radio Modes: FSK and LoRa.
 
     Possible values:
-
     FSK: Frequency Shift Keying
-
     LORA: LoRa
     """
-    FSK = auto()  # Frequency Shift Keying
-    LORA = auto()  # LoRa
+    FSK  = auto()
+    LORA = auto()
 
     def __str__(self) -> str:
         return self.name
 
+
 class RadioHandler:
     def __init__(self, mode, data_callback):
         """
-        Initialize the RadioHandler class with SPI, GPIO setup, and set the receive mode.
+        Initialize the RadioHandler with SPI/GPIO and start receiving.
 
-        :param mode: 'fsk' for Frequency Shift Keying, 'lora' for LoRa.
-        :param data_callback: Callback function to handle received data.
+        :param mode:          RadioMode.FSK or RadioMode.LORA
+        :param data_callback: Called with (data_str, rssi, index) on RX
         """
-        GPIO.setmode(GPIO.BCM)  # Use BCM GPIO numbering
-        self.mode = mode
-        self.data_callback = data_callback  # Store the callback function
+        GPIO.setmode(GPIO.BCM)
+        self.mode          = mode
+        self.data_callback = data_callback
 
         if self.mode == RadioMode.FSK:
-            # Initialize FSK transceiver
             self.fsk_handler = FSK(
                 spiport=radio_defines.SPI_PORT,
                 channel=radio_defines.SPI_CHANNEL,
@@ -72,13 +68,12 @@ class RadioHandler:
                 freq=radio_defines.FSK_FREQ,
                 tx_power=radio_defines.FSK_TX_POWER,
                 fixLEN=radio_defines.FSK_FIX_LEN,
-                payload_len=radio_defines.FSK_PAYLOAD_LEN
+                payload_len=radio_defines.FSK_PAYLOAD_LEN,
             )
             self.fsk_handler.on_recv = self.handle_received_data
-            self.fsk_handler.SX1276SetRx_fsk()  # Start receiving in FSK mode
+            self.fsk_handler.SX1276SetRx_fsk()
 
         elif self.mode == RadioMode.LORA:
-            # Initialize LoRa transceiver using macros from radio_defines and set acks to False
             self.lora_handler = LoRa(
                 spi_channel=radio_defines.SPI_CHANNEL,
                 interrupt_pin=radio_defines.INTERRUPT_PIN,
@@ -89,72 +84,77 @@ class RadioHandler:
                 tx_power=radio_defines.LORA_POWER,
                 modem_config=radio_defines.LORA_MODEM_CONFIG,
                 acks=radio_defines.LORA_ACKS,
-                receive_all=True
+                receive_all=True,
             )
-
-            self.lora_handler.on_recv = self.handle_received_data  # Set callback for received data
-            self.lora_handler.set_mode_rx()  # Start in receive mode
+            self.lora_handler.on_recv = self.handle_received_data
+            self.lora_handler.set_mode_rx()
 
         else:
             raise ValueError("Invalid mode. Please choose 'fsk' or 'lora'.")
 
         print(f"{self.mode} handler is running... Waiting for data.")
 
+    # ------------------------------------------------------------------ #
+
     def start_rx(self):
-        """Start receiving data in FSK or LoRa mode."""
+        """Switch radio back to continuous receive mode."""
         if self.mode == RadioMode.FSK:
             self.fsk_handler.SX1276SetRx_fsk()
         elif self.mode == RadioMode.LORA:
-            self.lora_handler.set_mode_rx()  # Set LoRa to RX mode
-        else:
-            raise ValueError("Invalid mode. Please choose 'fsk' or 'lora'.")
+            self.lora_handler.set_mode_rx()
 
     def handle_received_data(self, data, rssi=None, index=None):
-        """
-        Handle received data for both FSK and LoRa.
-
-        :param data: The received data payload.
-        """
+        """Decode raw bytes from driver and forward to data_callback."""
         if self.mode == RadioMode.FSK:
-            # FSK Mode: Data received through the FSK driver
             if data:
-                decoded_data = ''.join(chr(elem) for elem in data)
+                decoded = ''.join(chr(b) for b in data)
                 print(f"Received FSK data: (RSSI: {rssi} dBm, Index: {index})")
-                self.data_callback(decoded_data, rssi, index)
+                self.data_callback(decoded, rssi, index)
             else:
                 print("Received empty or noise data.")
+
         elif self.mode == RadioMode.LORA:
-            # LoRa Mode: Data received through the LoRa transceiver
             int_data = [int(b) for b in data.message]
             int_data.insert(0, data.header_flags)
             int_data.insert(0, data.header_id)
             int_data.insert(0, data.header_from)
             int_data.insert(0, data.header_to)
-            decoded_message = ''.join(chr(b) for b in int_data)
+            decoded = ''.join(chr(b) for b in int_data)
             print(f"Received LoRa data: (RSSI: {data.rssi} dBm)")
-            self.data_callback(decoded_message, data.rssi)
+            self.data_callback(decoded, data.rssi)
 
     def send(self, message):
-        """Send a message in FSK or LoRa mode."""
+        """
+        Transmit a message and return only after the radio has finished
+        sending and is back in RX mode.
+
+        For FSK @ 4800 bps a 41-byte frame takes ~86 ms on air.
+        We call wait_packet_sent() (polls up to 1 s for TX-done interrupt)
+        instead of a fixed sleep so we return as soon as TX is actually done.
+        """
         if self.mode == RadioMode.FSK:
             self._send_fsk(message)
+            # Wait for TX-done interrupt (DIO1 → _handle_interrupt sets
+            # self._mode back out of MODE_TX).  Timeout = 1 s (driver default).
+            sent = self.fsk_handler.wait_packet_sent()
+            if not sent:
+                print("WARNING: wait_packet_sent() timed out — forcing RX")
+            self.start_rx()
+
         elif self.mode == RadioMode.LORA:
             self._send_lora(message)
-        sleep(0.1)
-        self.start_rx()  # Start receiving data after sending
+            sleep(0.1)
+            self.start_rx()
 
     def _send_fsk(self, message):
-        """Send a message using FSK mode."""
         print(f"Sending FSK message: {message}")
         self.fsk_handler.send_fsk(message)
 
     def _send_lora(self, message):
-        """Send a message using LoRa mode."""
         print(f"Sending LoRa message: {message}")
         self.lora_handler.send(message, 98)
 
     def cleanup(self):
-        """Clean up resources for FSK or LoRa."""
         if self.mode == RadioMode.FSK:
             self.fsk_handler.close()
         elif self.mode == RadioMode.LORA:
