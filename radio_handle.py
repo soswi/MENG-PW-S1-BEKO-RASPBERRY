@@ -13,14 +13,9 @@ from time import sleep
 
 _FSK_FRAME_AIR_TIME_S = 0.130
 
-_REG_01_OP_MODE    = 0x01
-_REG_00_FIFO       = 0x00
-_REG_13_IRQ2       = 0x13
-_REG_40_DIOMAP1    = 0x40
-_REG_41_DIOMAP2    = 0x41
-_MODE_SLEEP        = 0x00
-_MODE_STDBY        = 0x01
-_MODE_RXCONT       = 0x05
+_REG_01_OP_MODE = 0x01
+_MODE_SLEEP     = 0x00
+_MODE_RXCONT    = 0x05
 
 
 class RadioMode(Enum):
@@ -50,9 +45,8 @@ class RadioHandler:
                 fixLEN=radio_defines.FSK_FIX_LEN,
                 payload_len=radio_defines.FSK_PAYLOAD_LEN,
             )
-            self._spi = self.fsk_handler.spi
             self.fsk_handler.on_recv = self.handle_received_data
-            self._force_rx()
+            self.fsk_handler.SX1276SetRx_fsk()
 
         elif self.mode == RadioMode.LORA:
             self.lora_handler = LoRa(
@@ -77,58 +71,53 @@ class RadioHandler:
 
     # ------------------------------------------------------------------ #
 
-    def _spi_r(self, reg):
-        return self._spi.xfer([reg & 0x7F, 0x00])[1]
-
-    def _spi_w(self, reg, val):
-        self._spi.xfer([reg | 0x80, val])
-
-    def _force_rx(self):
+    def _reinit_fsk_rx(self):
         """
-        Re-enter FSK RxContinuous after TX without a full hardware reset.
-
-        The chip config (frequency, bitrate, sync word, etc.) is untouched by
-        TX. Only three things need fixing after TX:
-          1. _mode is stale — set_mode_rx_fsk() has a guard "if _mode !=
-             RXCONT" that silently skips the write; forcing SLEEP here ensures
-             it always runs.
-          2. DIO0 mapping was changed for TX — SX1276SetRx_fsk() restores it
-             to PayloadReady and re-writes RXCONFIG.
-          3. A TxDone callback may be queued — remove_event_detect flushes it
-             so it cannot fire with _mode=RXCONT and call
-             RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK while the chip is in FSRx.
+        Re-enter FSK RxContinuous after TX by re-running the full chip
+        initialisation sequence.  This is the same path taken in __init__
+        and is the only reliable way to recover after TX on this chip.
         """
-        # Flush any queued TxDone callback before changing driver state.
+        # Remove event detection so no stale TxDone / PayloadReady callback
+        # fires while the chip is being reconfigured.
         GPIO.remove_event_detect(radio_defines.INTERRUPT_PIN)
 
-        with self.fsk_handler._hw_lock:
-            # Guarantee set_mode_rx_fsk()'s guard always passes
-            self.fsk_handler._mode = _MODE_SLEEP
-            # Land in STDBY first — SX1276 PLL cannot lock from TX/SLEEP directly
-            self._spi_w(_REG_01_OP_MODE, _MODE_STDBY)
-            sleep(0.005)
-            # Restore DIO0→PayloadReady, re-write RXCONFIG, enter RXCONT
-            self.fsk_handler.SX1276SetRx_fsk()
-            # Poll inside lock — blocks any re-queued callback until RXCONT confirmed
-            mode_ok = False
-            for _ in range(50):
-                sleep(0.002)
-                if (self._spi_r(_REG_01_OP_MODE) & 0x07) == _MODE_RXCONT:
-                    mode_ok = True
-                    break
+        # Ensure the driver's mode shadow is not RXCONTINUOUS so that
+        # set_mode_rx_fsk()'s guard does not silently skip the mode write.
+        self.fsk_handler._mode = _MODE_SLEEP
 
-        # Re-arm DIO0 edge detection with a clean slate
+        # Full re-init — mirrors FSK.__init__ (after GPIO/SPI setup).
+        # SX1276SetModem() inside each step writes SLEEP first, so the chip
+        # is always in a known quiescent state before the final mode switch.
+        self.fsk_handler.SX1276Init()
+        self.fsk_handler.SX1276SetChannel()
+        self.fsk_handler.SX1276SetTxConfig(fixLEN=radio_defines.FSK_FIX_LEN)
+        self.fsk_handler.SX1276SetRxConfig(
+            fixLEN=radio_defines.FSK_FIX_LEN,
+            payload_len=radio_defines.FSK_PAYLOAD_LEN,
+        )
+        self.fsk_handler.SX1276SetRx_fsk()
+
+        # Verify the chip reached RxContinuous.
+        mode_ok = False
+        for _ in range(50):
+            sleep(0.002)
+            mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+            if (mode & 0x07) == _MODE_RXCONT:
+                mode_ok = True
+                break
+
+        # Re-arm edge detection now that the chip is stable.
         GPIO.add_event_detect(radio_defines.INTERRUPT_PIN, GPIO.RISING,
                               callback=self.fsk_handler._handle_interrupt)
 
-        mode = self._spi_r(_REG_01_OP_MODE)
+        mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
         print(f"  [RX] mode=0x{mode:02X} (mode-bits={mode & 0x07}) poll={'OK' if mode_ok else 'TIMEOUT'}")
 
     # ------------------------------------------------------------------ #
 
     def start_rx(self):
         if self.mode == RadioMode.FSK:
-            self._force_rx()
+            self._reinit_fsk_rx()
         elif self.mode == RadioMode.LORA:
             self.lora_handler.set_mode_rx()
 
@@ -154,7 +143,7 @@ class RadioHandler:
         if self.mode == RadioMode.FSK:
             self._send_fsk(message)
             sleep(_FSK_FRAME_AIR_TIME_S)
-            self._force_rx()
+            self._reinit_fsk_rx()
         elif self.mode == RadioMode.LORA:
             self._send_lora(message)
             sleep(0.1)
