@@ -16,6 +16,7 @@ Public interface (called from terminal menu or Flask):
 """
 
 import logging
+import os
 import threading
 from time import sleep, time
 from typing import Optional
@@ -34,6 +35,9 @@ from beko_protocol import (
 )
 
 log = logging.getLogger("beko.radio")
+
+# Persist TX sequence counter across restarts so STM32 replay window never rejects.
+_SEQ_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".beko_tx_seq")
 
 # How long to wait after radio_handle.send() before entering the RX wait loop.
 # radio_handle does sleep(0.1) + start_rx() internally, so we need a bit more
@@ -57,7 +61,7 @@ class RadioController:
                  aes_key: bytes = AES_KEY):
         self._mode   = mode
         self._crypto = CryptoLayer(aes_key)
-        self._tx_seq = 0
+        self._tx_seq = self._load_tx_seq()
 
         self._state       = _State.IDLE
         self._cmd_lock    = threading.Lock()
@@ -80,6 +84,30 @@ class RadioController:
         self._last_frame: Optional[bf.BekoFrame] = None
 
         self._handler: Optional[RadioHandler] = None
+
+    # ------------------------------------------------------------------ #
+    # Sequence counter persistence                                        #
+    # ------------------------------------------------------------------ #
+
+    def _load_tx_seq(self) -> int:
+        """Load last-saved TX seq from disk and advance by a gap to skip already-seen values."""
+        try:
+            with open(_SEQ_FILE, "r") as f:
+                saved = int(f.read().strip())
+            seq = (saved + 20) & 0xFFFF
+            log.info(f"TX seq loaded: saved={saved} → starting at {seq}")
+            return seq
+        except Exception:
+            log.info("TX seq file not found — starting at 1")
+            return 1
+
+    def _save_tx_seq(self):
+        """Persist current _tx_seq so next startup won't replay already-used values."""
+        try:
+            with open(_SEQ_FILE, "w") as f:
+                f.write(str(self._tx_seq))
+        except Exception as e:
+            log.warning(f"Could not save TX seq: {e}")
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                           #
@@ -245,6 +273,7 @@ class RadioController:
         )
         self._tx_seq += 1
         log.info(f"TX CMD angle={angle} op={op_code} seq={self._tx_seq - 1}")
+        self._save_tx_seq()
         self._handler.send(raw_frame.decode('latin-1'))
 
     def _send_ack_frame(self, result: int = 0, flags: int = FRAME_FLAG_ACK):
@@ -260,6 +289,7 @@ class RadioController:
         )
         self._tx_seq += 1
         log.info(f"TX ACK flags=0x{flags:02X} seq={self._tx_seq - 1}")
+        self._save_tx_seq()
         self._handler.send(raw_frame.decode('latin-1'))
 
     # ------------------------------------------------------------------ #
