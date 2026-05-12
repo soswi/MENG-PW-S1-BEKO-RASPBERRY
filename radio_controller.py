@@ -190,6 +190,9 @@ class RadioController:
 
                 # Normal TELEM — send ACK and return success
                 telem = bf.parse_telem_payload(frame.plaintext)
+                # STM32 needs ~200 ms after TELEM TX to switch its radio to RX.
+                # ACK preamble must arrive AFTER Radio.Rx(0) is called on STM32.
+                sleep(0.3)
                 self._send_ack_frame(result=0, flags=FRAME_FLAG_ACK)
                 self._state = _State.ACK_SENT
 
