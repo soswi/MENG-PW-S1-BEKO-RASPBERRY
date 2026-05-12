@@ -85,58 +85,41 @@ class RadioHandler:
 
     def _force_rx(self):
         """
-        Force SX1276 into FSK RX continuous regardless of current state.
+        Re-enter FSK RxContinuous after TX without a full hardware reset.
 
-        Sequence:
-          1. STDBY — halt any ongoing RX/TX
-          2. Flush FIFO atomically via FifoOverrun flag (clears FIFO and
-             PayloadReady in one register write — avoids unreliable
-             byte-by-byte drain that left stale 0x29 data behind)
-          3. Configure DIO0→PayloadReady in STDBY, BEFORE entering RX so
-             the GPIO edge detector is armed and no rising edge can be missed
-          4. Clear driver RX buffers
-          5. Set _mode flag so _handle_interrupt() accepts callbacks
-          6. Enter RXCONT, then poll until hardware confirms 0x05.
-             Without polling the radio can linger at 0x04 (FSRx / PLL
-             locking) and calling RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK in
-             that state has no effect — leaving the radio deaf.
+        The chip config (frequency, bitrate, sync word, etc.) is untouched by
+        TX. Only three things need fixing after TX:
+          1. _mode is stale — set_mode_rx_fsk() has a guard "if _mode !=
+             RXCONT" that silently skips the write; forcing SLEEP here ensures
+             it always runs.
+          2. DIO0 mapping was changed for TX — SX1276SetRx_fsk() restores it
+             to PayloadReady and re-writes RXCONFIG.
+          3. A TxDone callback may be queued — remove_event_detect flushes it
+             so it cannot fire with _mode=RXCONT and call
+             RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK while the chip is in FSRx.
         """
+        # Flush any queued TxDone callback before changing driver state.
+        GPIO.remove_event_detect(radio_defines.INTERRUPT_PIN)
+
         with self.fsk_handler._hw_lock:
-            # 1. Force STDBY
-            self._spi_w(_REG_01_OP_MODE, _MODE_STDBY)
-            sleep(0.010)
-
-            # 2. Flush FIFO: writing FifoOverrun bit (bit 4) to RegIrqFlags2
-            #    atomically empties the FIFO and clears PayloadReady.
-            self._spi_w(_REG_13_IRQ2, 0x10)
-            sleep(0.002)
-
-            # 3. DIO0→PayloadReady (bits[7:6]=00 in FSK RX) configured while
-            #    still in STDBY — radio cannot receive here, so no edge missed.
-            self._spi_w(_REG_40_DIOMAP1,
-                        (self._spi_r(_REG_40_DIOMAP1) & 0x03) | 0x0C)
-            self._spi_w(_REG_41_DIOMAP2,
-                        (self._spi_r(_REG_41_DIOMAP2) & 0x3E) | 0xC1)
-
-            # 4. Clear driver RX state
-            self.fsk_handler._rx_buffer      = []
-            self.fsk_handler._rx_payload_len = 0
-            self.fsk_handler._rssi           = 0
-            self.fsk_handler._mode = _MODE_RXCONT
-
-            # 5. Enter RX continuous, then poll until hardware confirms 0x05.
-            #    The chip briefly passes through FSRx (0x04) while the PLL
-            #    locks; reading back 0x04 and treating it as "done" leaves
-            #    the radio deaf to incoming packets.
-            self._spi_w(_REG_01_OP_MODE, _MODE_RXCONT)
-            for _ in range(20):
-                sleep(0.001)
+            # Guarantee set_mode_rx_fsk()'s guard always passes
+            self.fsk_handler._mode = _MODE_SLEEP
+            # Restore DIO0→PayloadReady, re-write RXCONFIG, enter RXCONT
+            self.fsk_handler.SX1276SetRx_fsk()
+            # Poll inside lock — blocks any re-queued callback until RXCONT confirmed
+            mode_ok = False
+            for _ in range(50):
+                sleep(0.002)
                 if (self._spi_r(_REG_01_OP_MODE) & 0x07) == _MODE_RXCONT:
+                    mode_ok = True
                     break
 
+        # Re-arm DIO0 edge detection with a clean slate
+        GPIO.add_event_detect(radio_defines.INTERRUPT_PIN, GPIO.RISING,
+                              callback=self.fsk_handler._handle_interrupt)
+
         mode = self._spi_r(_REG_01_OP_MODE)
-        irq2 = self._spi_r(_REG_13_IRQ2)
-        print(f"  [RX] mode=0x{mode:02X}  PayloadReady={bool(irq2 & 0x04)}")
+        print(f"  [RX] mode=0x{mode:02X} (mode-bits={mode & 0x07}) poll={'OK' if mode_ok else 'TIMEOUT'}")
 
     # ------------------------------------------------------------------ #
 
