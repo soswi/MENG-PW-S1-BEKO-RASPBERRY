@@ -13,12 +13,14 @@ from time import sleep
 
 _FSK_FRAME_AIR_TIME_S = 0.130
 
-_REG_01_OP_MODE = 0x01
-_REG_00_FIFO    = 0x00
-_REG_13_IRQ2    = 0x13
-_MODE_SLEEP     = 0x00
-_MODE_STDBY     = 0x01
-_MODE_RXCONT    = 0x05
+_REG_01_OP_MODE    = 0x01
+_REG_00_FIFO       = 0x00
+_REG_13_IRQ2       = 0x13
+_REG_40_DIOMAP1    = 0x40
+_REG_41_DIOMAP2    = 0x41
+_MODE_SLEEP        = 0x00
+_MODE_STDBY        = 0x01
+_MODE_RXCONT       = 0x05
 
 
 class RadioMode(Enum):
@@ -85,17 +87,25 @@ class RadioHandler:
         """
         Force SX1276 into FSK RX continuous regardless of current state.
 
-        Bypasses all driver guards by writing directly to the register
-        and setting _mode manually AFTER the register write, so the guard
-        in set_mode_rx_fsk() cannot block the transition.
+        Root cause of the missed-TELEM bug: the old code called
+        SX1276SetRx_fsk() AFTER entering RXCONT.  That call writes to
+        RXCONFIG which triggers a receiver restart (hardware briefly drops
+        to FSRx/0x04).  If the TELEM frame completed reception during that
+        window, PayloadReady was already high when DIO0 was finally mapped
+        to it — no rising edge, no GPIO interrupt, 5 s timeout.
 
-        Sequence:
-          1. Write STDBY to register directly
-          2. Drain FIFO (read until PayloadReady clears or 64 bytes done)
-          3. Write RX continuous to register directly
-          4. Sync _mode flag to match reality
-          5. Re-configure DIO mapping via SX1276SetRx_fsk() without
-             the mode-switch (we already did it)
+        Fixed sequence:
+          1. STDBY  — stop any ongoing reception
+          2. Drain FIFO while PayloadReady is set (discard stale data)
+          3. Configure DIO0→PayloadReady BEFORE entering RX so the GPIO
+             edge detector is armed before the first packet can arrive
+          4. Clear driver RX buffers
+          5. Set _mode flag so _handle_interrupt() accepts callbacks
+          6. Enter RXCONT — interrupt is already armed, no edge can be missed
+          7. If PayloadReady is already set after entering RX (packet was in
+             the FIFO before the drain, or arrived during the µs transition),
+             manually trigger _handle_interrupt() — there will be no rising
+             edge on DIO0 for an already-high signal.
         """
         with self.fsk_handler._hw_lock:
             # 1. Force STDBY
@@ -108,28 +118,37 @@ class RadioHandler:
                     break
                 self._spi_r(_REG_00_FIFO)
 
-            # 3. Force RX continuous directly into register
-            self._spi_w(_REG_01_OP_MODE, _MODE_RXCONT)
-            sleep(0.010)
+            # 3. DIO mapping: DIO0→PayloadReady (bits[7:6]=00 in FSK RX).
+            #    Done here, in STDBY, BEFORE entering RX.  The radio cannot
+            #    receive in STDBY so no packet can arrive between the mapping
+            #    write and the mode switch — no edge can be missed.
+            self._spi_w(_REG_40_DIOMAP1,
+                        (self._spi_r(_REG_40_DIOMAP1) & 0x03) | 0x0C)
+            self._spi_w(_REG_41_DIOMAP2,
+                        (self._spi_r(_REG_41_DIOMAP2) & 0x3E) | 0xC1)
 
-            # 4. Sync driver's internal flag — AFTER we wrote the register
-            #    so no interrupt thread can set it back in between
+            # 4. Clear driver RX state
+            self.fsk_handler._rx_buffer      = []
+            self.fsk_handler._rx_payload_len = 0
+            self.fsk_handler._rssi           = 0
+
+            # 5. Sync _mode BEFORE the register write so _handle_interrupt()
+            #    accepts callbacks the instant the radio starts receiving.
             self.fsk_handler._mode = _MODE_RXCONT
 
-        # 5. Re-apply DIO mapping (needed for PayloadReady→DIO0 interrupt)
-        #    Call SX1276SetRx_fsk but skip its set_mode_rx_fsk() since
-        #    we already set the mode. We achieve this by temporarily setting
-        #    _mode = RXCONTINUOUS so set_mode_rx_fsk guard skips the write
-        #    but DIO mapping registers are still updated.
-        #    Actually SX1276SetRx_fsk does DIO mapping THEN calls set_mode_rx_fsk.
-        #    The DIO mapping writes happen unconditionally — so just call it.
-        #    set_mode_rx_fsk guard will see _mode==RXCONTINUOUS and skip — good,
-        #    because we already wrote the register directly above.
-        self.fsk_handler.SX1276SetRx_fsk()
+            # 6. Enter RX continuous
+            self._spi_w(_REG_01_OP_MODE, _MODE_RXCONT)
+            sleep(0.010)
 
         mode = self._spi_r(_REG_01_OP_MODE)
         irq2 = self._spi_r(_REG_13_IRQ2)
         print(f"  [RX] mode=0x{mode:02X}  PayloadReady={bool(irq2 & 0x04)}")
+
+        # 7. PayloadReady already high → DIO0 was high before GPIO edge
+        #    detector armed (or drain missed a packet).  No rising edge will
+        #    fire, so manually trigger the read.
+        if irq2 & 0x04:
+            self.fsk_handler._handle_interrupt(None)
 
     # ------------------------------------------------------------------ #
 

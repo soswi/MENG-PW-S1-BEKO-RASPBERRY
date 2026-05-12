@@ -1,4 +1,4 @@
-"""""
+"""
 MIT License
 
 Copyright (c) 2024 BEER-TEAM (Piotr Polnau, Jan Sosulski, Piotr Baprawski)
@@ -22,29 +22,23 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-# Constants for the radio module
-
 from pyLoraRFM9x.constants import ModemConfig
 
-# Board-specific configurations
-SPI_PORT = 0            # SPI bus number (usually 0)
-SPI_CHANNEL = 1         # SPI channel (0 for CE0, 1 for CE1)
-INTERRUPT_PIN = 22      # GPIO pin connected to DIO0 (change according to your setup)
-INTERRUPT_PIN1 = 23     # GPIO pin connected to DIO1
-INTERRUPT_PIN2 = 24     # GPIO pin connected to DIO2
-RESET_PIN = 25          # GPIO pin connected to reset (optional, if connected)
+SPI_PORT = 0
+SPI_CHANNEL = 1
+INTERRUPT_PIN = 22
+INTERRUPT_PIN1 = 23
+INTERRUPT_PIN2 = 24
+RESET_PIN = 25
 
+FSK_FREQ = 868.0
+FSK_TX_POWER = 17
+FSK_FIX_LEN = 0
+FSK_PAYLOAD_LEN = 255
 
-# FSK-specific configurations
-FSK_FREQ = 868.0            # Frequency in MHz for FSK
-FSK_TX_POWER = 17            # Transmission power in dBm for FSK
-FSK_FIX_LEN = 0             # Set to 0 for variable length packets in FSK
-FSK_PAYLOAD_LEN = 255       # Set maximum payload length for FSK
-
-# LoRa-specific configurations
-LORA_FREQ = 868.0           # Frequency in MHz for LoRa
-LORA_MODEM_CONFIG = ModemConfig.Bw125Cr45Sf128 # Modem configuration for LoRa
-LORA_SYNC_WORD = 0x12       # Sync word for LoRa (0x12 is default)
-LORA_POWER = 0              # Transmission power in dBm for LoRa
-LORA_ACKS = False           # Enable or disable ACKs for LoRa
-LORA_ADDR = 2               # Device address for LoRa
+LORA_FREQ = 868.0
+LORA_MODEM_CONFIG = ModemConfig.Bw125Cr45Sf128
+LORA_SYNC_WORD = 0x12
+LORA_POWER = 0
+LORA_ACKS = False
+LORA_ADDR = 2
