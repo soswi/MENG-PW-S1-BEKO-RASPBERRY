@@ -87,13 +87,16 @@ class RadioHandler:
         """
         Full hardware reset + reconfigure to reliably enter FSK RxContinuous.
 
-        Root cause: after set_mode_rx_fsk() writes 0x05 and sets
-        _mode=RXCONTINUOUS, a queued DIO0 interrupt from the TxDone cycle
-        unblocks and fires while the chip is still in FSRx (0x04, PLL
-        locking). The handler writes RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK
-        during FSRx which aborts the transition and drops the chip to
-        SLEEP (0x00). Fix: poll for hardware mode=0x05 inside _hw_lock so
-        the interrupt handler cannot touch RXCONFIG until PLL lock is done.
+        Three-part fix for the TX→RX transition failure:
+          1. GPIO.remove_event_detect — flushes any queued TxDone callback
+             that would otherwise fire (with stale _mode=RXCONT) and call
+             RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK while the chip is in FSRx,
+             aborting the PLL lock and dropping the chip back to SLEEP.
+          2. Force _mode=SLEEP before SX1276SetRx_fsk() — set_mode_rx_fsk()
+             has a guard "if _mode != RXCONT" that silently skips the mode
+             write when _mode is stale; forcing SLEEP ensures it always runs.
+          3. GPIO.add_event_detect after confirmed RXCONT — clean edge
+             detector with no history of stale TX edges.
         """
         # Hardware reset — separate GPIO line, no SPI lock needed
         GPIO.setup(radio_defines.RESET_PIN, GPIO.OUT)
@@ -101,6 +104,11 @@ class RadioHandler:
         sleep(0.010)
         GPIO.output(radio_defines.RESET_PIN, GPIO.HIGH)
         sleep(0.010)
+
+        # Flush any queued TxDone callback BEFORE acquiring the lock.
+        # Calling remove_event_detect while holding _hw_lock would deadlock
+        # if the callback thread is blocked inside _spi_read() on that lock.
+        GPIO.remove_event_detect(radio_defines.INTERRUPT_PIN)
 
         # _hw_lock is an RLock — nested acquisitions inside driver methods are safe.
         with self.fsk_handler._hw_lock:
@@ -112,14 +120,19 @@ class RadioHandler:
                 fixLEN=radio_defines.FSK_FIX_LEN,
                 payload_len=radio_defines.FSK_PAYLOAD_LEN,
             )
+            # Force _mode to SLEEP so set_mode_rx_fsk()'s guard never skips it
+            self.fsk_handler._mode = _MODE_SLEEP
             # Set DIO0→PayloadReady, clear RX buffers, write RXCONT to RegOpMode
             self.fsk_handler.SX1276SetRx_fsk()
-            # Poll inside the lock: interrupt handler blocks on _hw_lock here,
-            # so RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK cannot fire during FSRx.
-            for _ in range(50):
+            # Poll until hardware confirms RXCONT (250 ms max)
+            for _ in range(125):
                 sleep(0.002)
                 if (self._spi_r(_REG_01_OP_MODE) & 0x07) == _MODE_RXCONT:
                     break
+
+        # Re-arm DIO0 edge detection with a clean slate — no stale TX edges
+        GPIO.add_event_detect(radio_defines.INTERRUPT_PIN, GPIO.RISING,
+                              callback=self.fsk_handler._handle_interrupt)
 
         mode = self._spi_r(_REG_01_OP_MODE)
         irq2 = self._spi_r(_REG_13_IRQ2)
