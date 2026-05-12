@@ -16,6 +16,8 @@ _FSK_FRAME_AIR_TIME_S = 0.130
 
 _REG_01_OP_MODE    = 0x01
 _REG_3E_IRQ_FLAGS1 = 0x3E   # bit7=ModeReady  bit4=PllLock  bit6=RxReady
+_REG_40_DIO_MAP1   = 0x40   # bits[7:6]=DIO0  00=PayloadReady/PacketSent
+_REG_3F_IRQ_FLAGS2 = 0x3F   # bit2=PayloadReady  bit3=PacketSent  bit6=FifoEmpty
 _MODE_SLEEP        = 0x00
 _MODE_STDBY        = 0x01
 _MODE_RXCONT       = 0x05
@@ -138,13 +140,28 @@ class RadioHandler:
         _, s = _chip_status(self.fsk_handler)
         print(f"[{_ts()}] [REINIT] after _enter_fsk_rx — {s} sw={self.fsk_handler._mode}")
 
+        # Confirm DIO0 is mapped to PayloadReady (bits[7:6] of REG_40 must be 00).
+        dio  = self.fsk_handler._spi_read(_REG_40_DIO_MAP1)
+        irq2 = self.fsk_handler._spi_read(_REG_3F_IRQ_FLAGS2)
+        print(f"[{_ts()}] [REINIT] DIO_MAP1=0x{dio:02X} DIO0_field={dio >> 6} "
+              f"(0=PayloadReady) IrqF2=0x{irq2:02X} "
+              f"PayloadReady={(irq2 >> 2) & 1} FifoEmpty={(irq2 >> 6) & 1}")
+
         # Re-arm interrupt HERE — before the poll — so we never miss a PayloadReady.
-        # The chip shows hw=0x04 (FSRx) while scanning for a preamble; this is the
-        # SX1276 "RxContinuous waiting" sub-state.  The chip auto-advances to 0x05
-        # when a preamble is detected, then fires PayloadReady on DIO0.  If we wait
-        # until after the poll to re-arm, we miss any TELEM that arrives during polling.
+        # Wrapped handler logs every DIO0 edge so we can confirm if/when it fires.
+        def _irq_logged(channel):
+            irq2_now = self.fsk_handler._spi_read(_REG_3F_IRQ_FLAGS2)
+            print(f"[{_ts()}] [IRQ] DIO0 FIRED ch={channel} "
+                  f"sw_mode=0x{self.fsk_handler._mode:02X} "
+                  f"IrqF2=0x{irq2_now:02X} PayloadReady={(irq2_now >> 2) & 1}")
+            self.fsk_handler._handle_interrupt(channel)
+            irq2_after = self.fsk_handler._spi_read(_REG_3F_IRQ_FLAGS2)
+            print(f"[{_ts()}] [IRQ] handler done "
+                  f"sw_mode=0x{self.fsk_handler._mode:02X} "
+                  f"IrqF2=0x{irq2_after:02X}")
+
         GPIO.add_event_detect(radio_defines.INTERRUPT_PIN, GPIO.RISING,
-                              callback=self.fsk_handler._handle_interrupt)
+                              callback=_irq_logged)
         print(f"[{_ts()}] [REINIT] interrupt re-armed — chip now listening")
 
         # Diagnostic poll only — does NOT block reception.
