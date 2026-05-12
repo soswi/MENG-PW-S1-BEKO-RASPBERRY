@@ -138,21 +138,23 @@ class RadioHandler:
         _, s = _chip_status(self.fsk_handler)
         print(f"[{_ts()}] [REINIT] after _enter_fsk_rx — {s} sw={self.fsk_handler._mode}")
 
-        # Poll for RxContinuous — read both OpMode and IrqFlags1 every iteration
+        # Re-arm interrupt HERE — before the poll — so we never miss a PayloadReady.
+        GPIO.add_event_detect(radio_defines.INTERRUPT_PIN, GPIO.RISING,
+                              callback=self.fsk_handler._handle_interrupt)
+        print(f"[{_ts()}] [REINIT] interrupt re-armed — chip now listening")
+
+        # Diagnostic poll only — does NOT block reception.
         mode_ok = False
-        for i in range(100):
+        for i in range(10):
             sleep(0.004)
             mode, s = _chip_status(self.fsk_handler)
-            print(f"[{_ts()}] [REINIT] poll[{i:03d}] {s}")
+            print(f"[{_ts()}] [REINIT] poll[{i:02d}] {s}")
             if (mode & 0x07) == _MODE_RXCONT:
                 mode_ok = True
                 break
 
-        GPIO.add_event_detect(radio_defines.INTERRUPT_PIN, GPIO.RISING,
-                              callback=self.fsk_handler._handle_interrupt)
-
         _, s = _chip_status(self.fsk_handler)
-        print(f"[{_ts()}] [REINIT] --- end poll={'OK' if mode_ok else 'TIMEOUT'} {s} ---")
+        print(f"[{_ts()}] [REINIT] --- end poll={'OK(0x05)' if mode_ok else 'scanning(0x04)'} {s} ---")
 
     # ------------------------------------------------------------------ #
 
