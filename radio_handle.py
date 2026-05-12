@@ -47,6 +47,8 @@ class RadioHandler:
             )
             self.fsk_handler.on_recv = self.handle_received_data
             self.fsk_handler.SX1276SetRx_fsk()
+            mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+            print(f"  [INIT] FSK ready — hw_mode=0x{mode:02X} (bits={mode & 0x07})")
 
         elif self.mode == RadioMode.LORA:
             self.lora_handler = LoRa(
@@ -71,47 +73,76 @@ class RadioHandler:
 
     # ------------------------------------------------------------------ #
 
+    def _hw_reset(self):
+        """Pulse RESET_PIN low for 10 ms — same as FSK.__init__ does."""
+        GPIO.setup(radio_defines.RESET_PIN, GPIO.OUT)
+        GPIO.output(radio_defines.RESET_PIN, GPIO.LOW)
+        sleep(0.010)
+        GPIO.output(radio_defines.RESET_PIN, GPIO.HIGH)
+        sleep(0.010)
+        mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+        print(f"  [HW_RESET] done — hw_mode=0x{mode:02X} (bits={mode & 0x07})")
+
     def _reinit_fsk_rx(self):
         """
-        Re-enter FSK RxContinuous after TX by re-running the full chip
-        initialisation sequence.  This is the same path taken in __init__
-        and is the only reliable way to recover after TX on this chip.
-        """
-        # Remove event detection so no stale TxDone / PayloadReady callback
-        # fires while the chip is being reconfigured.
-        GPIO.remove_event_detect(radio_defines.INTERRUPT_PIN)
+        Re-enter FSK RxContinuous after TX.
 
-        # Ensure the driver's mode shadow is not RXCONTINUOUS so that
-        # set_mode_rx_fsk()'s guard does not silently skip the mode write.
+        Mirrors FSK.__init__ exactly: hardware reset followed by the full
+        four-step software initialisation sequence.
+        """
+        print("  [REINIT] --- begin ---")
+
+        # 1. Kill edge detection so no stale callback fires mid-reinit.
+        GPIO.remove_event_detect(radio_defines.INTERRUPT_PIN)
+        mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+        print(f"  [REINIT] event_detect removed — hw=0x{mode:02X} sw_mode={self.fsk_handler._mode}")
+
+        # 2. Hardware reset (chip returns to factory defaults).
+        self._hw_reset()
+
+        # 3. Reset the driver mode shadow so guards don't skip mode writes.
         self.fsk_handler._mode = _MODE_SLEEP
 
-        # Full re-init — mirrors FSK.__init__ (after GPIO/SPI setup).
-        # SX1276SetModem() inside each step writes SLEEP first, so the chip
-        # is always in a known quiescent state before the final mode switch.
+        # 4–7. Full init sequence (same as FSK.__init__ after GPIO/SPI setup).
         self.fsk_handler.SX1276Init()
+        mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+        print(f"  [REINIT] after SX1276Init   — hw=0x{mode:02X} sw={self.fsk_handler._mode}")
+
         self.fsk_handler.SX1276SetChannel()
+        mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+        print(f"  [REINIT] after SetChannel   — hw=0x{mode:02X}")
+
         self.fsk_handler.SX1276SetTxConfig(fixLEN=radio_defines.FSK_FIX_LEN)
+        mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+        print(f"  [REINIT] after SetTxConfig  — hw=0x{mode:02X}")
+
         self.fsk_handler.SX1276SetRxConfig(
             fixLEN=radio_defines.FSK_FIX_LEN,
             payload_len=radio_defines.FSK_PAYLOAD_LEN,
         )
-        self.fsk_handler.SX1276SetRx_fsk()
+        mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+        print(f"  [REINIT] after SetRxConfig  — hw=0x{mode:02X}")
 
-        # Verify the chip reached RxContinuous.
+        self.fsk_handler.SX1276SetRx_fsk()
+        mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+        print(f"  [REINIT] after SetRx_fsk    — hw=0x{mode:02X} sw={self.fsk_handler._mode}")
+
+        # 8. Poll until RxContinuous (0x05) or timeout.
         mode_ok = False
-        for _ in range(50):
-            sleep(0.002)
+        for i in range(25):
+            sleep(0.004)
             mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+            print(f"  [REINIT] poll[{i:02d}] hw=0x{mode:02X} bits={mode & 0x07}")
             if (mode & 0x07) == _MODE_RXCONT:
                 mode_ok = True
                 break
 
-        # Re-arm edge detection now that the chip is stable.
+        # 9. Re-arm interrupt only after chip is confirmed stable.
         GPIO.add_event_detect(radio_defines.INTERRUPT_PIN, GPIO.RISING,
                               callback=self.fsk_handler._handle_interrupt)
 
         mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
-        print(f"  [RX] mode=0x{mode:02X} (mode-bits={mode & 0x07}) poll={'OK' if mode_ok else 'TIMEOUT'}")
+        print(f"  [REINIT] --- end: hw=0x{mode:02X} poll={'OK' if mode_ok else 'TIMEOUT'} ---")
 
     # ------------------------------------------------------------------ #
 
@@ -125,10 +156,10 @@ class RadioHandler:
         if self.mode == RadioMode.FSK:
             if data:
                 decoded = ''.join(chr(b) for b in data)
-                print(f"Received FSK data: (RSSI: {rssi} dBm, Index: {index})")
+                print(f"  [RECV] FSK payload len={len(data)} RSSI={rssi} idx={index}: {decoded!r}")
                 self.data_callback(decoded, rssi, index)
             else:
-                print("Received empty or noise data.")
+                print("  [RECV] FSK empty/noise frame")
         elif self.mode == RadioMode.LORA:
             int_data = [int(b) for b in data.message]
             int_data.insert(0, data.header_flags)
@@ -136,13 +167,19 @@ class RadioHandler:
             int_data.insert(0, data.header_from)
             int_data.insert(0, data.header_to)
             decoded = ''.join(chr(b) for b in int_data)
-            print(f"Received LoRa data: (RSSI: {data.rssi} dBm)")
+            print(f"  [RECV] LoRa RSSI={data.rssi} dBm")
             self.data_callback(decoded, data.rssi)
 
     def send(self, message):
         if self.mode == RadioMode.FSK:
+            mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+            print(f"  [SEND] pre-TX hw=0x{mode:02X} sw_mode={self.fsk_handler._mode}")
             self._send_fsk(message)
+            mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+            print(f"  [SEND] post-TX (before air-time sleep) hw=0x{mode:02X}")
             sleep(_FSK_FRAME_AIR_TIME_S)
+            mode = self.fsk_handler._spi_read(_REG_01_OP_MODE)
+            print(f"  [SEND] post-air-time hw=0x{mode:02X} sw_mode={self.fsk_handler._mode}")
             self._reinit_fsk_rx()
         elif self.mode == RadioMode.LORA:
             self._send_lora(message)
@@ -150,11 +187,11 @@ class RadioHandler:
             self.lora_handler.set_mode_rx()
 
     def _send_fsk(self, message):
-        print(f"Sending FSK message: {message}")
+        print(f"  [SEND] FSK message: {message!r}")
         self.fsk_handler.send_fsk(message)
 
     def _send_lora(self, message):
-        print(f"Sending LoRa message: {message}")
+        print(f"  [SEND] LoRa message: {message!r}")
         self.lora_handler.send(message, 98)
 
     def cleanup(self):
