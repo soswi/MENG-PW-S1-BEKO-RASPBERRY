@@ -104,6 +104,9 @@ class RadioHandler:
         with self.fsk_handler._hw_lock:
             # Guarantee set_mode_rx_fsk()'s guard always passes
             self.fsk_handler._mode = _MODE_SLEEP
+            # Land in STDBY first — SX1276 PLL cannot lock from TX/SLEEP directly
+            self._spi_w(_REG_01_OP_MODE, _MODE_STDBY)
+            sleep(0.005)
             # Restore DIO0→PayloadReady, re-write RXCONFIG, enter RXCONT
             self.fsk_handler.SX1276SetRx_fsk()
             # Poll inside lock — blocks any re-queued callback until RXCONT confirmed
