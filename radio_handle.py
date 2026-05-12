@@ -85,58 +85,41 @@ class RadioHandler:
 
     def _force_rx(self):
         """
-        Full hardware reset + reconfigure to reliably enter FSK RxContinuous.
+        Re-enter FSK RxContinuous after TX without a full hardware reset.
 
-        Three-part fix for the TX→RX transition failure:
-          1. GPIO.remove_event_detect — flushes any queued TxDone callback
-             that would otherwise fire (with stale _mode=RXCONT) and call
-             RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK while the chip is in FSRx,
-             aborting the PLL lock and dropping the chip back to SLEEP.
-          2. Force _mode=SLEEP before SX1276SetRx_fsk() — set_mode_rx_fsk()
-             has a guard "if _mode != RXCONT" that silently skips the mode
-             write when _mode is stale; forcing SLEEP ensures it always runs.
-          3. GPIO.add_event_detect after confirmed RXCONT — clean edge
-             detector with no history of stale TX edges.
+        The chip config (frequency, bitrate, sync word, etc.) is untouched by
+        TX. Only three things need fixing after TX:
+          1. _mode is stale — set_mode_rx_fsk() has a guard "if _mode !=
+             RXCONT" that silently skips the write; forcing SLEEP here ensures
+             it always runs.
+          2. DIO0 mapping was changed for TX — SX1276SetRx_fsk() restores it
+             to PayloadReady and re-writes RXCONFIG.
+          3. A TxDone callback may be queued — remove_event_detect flushes it
+             so it cannot fire with _mode=RXCONT and call
+             RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK while the chip is in FSRx.
         """
-        # Hardware reset — separate GPIO line, no SPI lock needed
-        GPIO.setup(radio_defines.RESET_PIN, GPIO.OUT)
-        GPIO.output(radio_defines.RESET_PIN, GPIO.LOW)
-        sleep(0.010)
-        GPIO.output(radio_defines.RESET_PIN, GPIO.HIGH)
-        sleep(0.010)
-
-        # Flush any queued TxDone callback BEFORE acquiring the lock.
-        # Calling remove_event_detect while holding _hw_lock would deadlock
-        # if the callback thread is blocked inside _spi_read() on that lock.
+        # Flush any queued TxDone callback before changing driver state.
         GPIO.remove_event_detect(radio_defines.INTERRUPT_PIN)
 
-        # _hw_lock is an RLock — nested acquisitions inside driver methods are safe.
         with self.fsk_handler._hw_lock:
-            # Restore all registers wiped by the reset
-            self.fsk_handler.SX1276Init()
-            self.fsk_handler.SX1276SetChannel()
-            self.fsk_handler.SX1276SetTxConfig(fixLEN=radio_defines.FSK_FIX_LEN)
-            self.fsk_handler.SX1276SetRxConfig(
-                fixLEN=radio_defines.FSK_FIX_LEN,
-                payload_len=radio_defines.FSK_PAYLOAD_LEN,
-            )
-            # Force _mode to SLEEP so set_mode_rx_fsk()'s guard never skips it
+            # Guarantee set_mode_rx_fsk()'s guard always passes
             self.fsk_handler._mode = _MODE_SLEEP
-            # Set DIO0→PayloadReady, clear RX buffers, write RXCONT to RegOpMode
+            # Restore DIO0→PayloadReady, re-write RXCONFIG, enter RXCONT
             self.fsk_handler.SX1276SetRx_fsk()
-            # Poll until hardware confirms RXCONT (250 ms max)
-            for _ in range(125):
+            # Poll inside lock — blocks any re-queued callback until RXCONT confirmed
+            mode_ok = False
+            for _ in range(50):
                 sleep(0.002)
                 if (self._spi_r(_REG_01_OP_MODE) & 0x07) == _MODE_RXCONT:
+                    mode_ok = True
                     break
 
-        # Re-arm DIO0 edge detection with a clean slate — no stale TX edges
+        # Re-arm DIO0 edge detection with a clean slate
         GPIO.add_event_detect(radio_defines.INTERRUPT_PIN, GPIO.RISING,
                               callback=self.fsk_handler._handle_interrupt)
 
         mode = self._spi_r(_REG_01_OP_MODE)
-        irq2 = self._spi_r(_REG_13_IRQ2)
-        print(f"  [RX] mode=0x{mode:02X}  PayloadReady={bool(irq2 & 0x04)}")
+        print(f"  [RX] mode=0x{mode:02X} (mode-bits={mode & 0x07}) poll={'OK' if mode_ok else 'TIMEOUT'}")
 
     # ------------------------------------------------------------------ #
 
