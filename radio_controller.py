@@ -2,6 +2,17 @@
 radio_controller.py
 ===================
 Application-layer radio controller for BEKO central station (Raspberry Pi).
+
+Sits between radio_handle.py (hardware FSK driver) and the operator interface.
+Owns the protocol state machine, sequence counters, and all frame build/parse
+logic.
+
+Public interface (called from terminal menu or Flask):
+    controller.send_cmd(angle, op_code)   -> dict
+    controller.send_unlock()              -> dict
+    controller.send_lock()                -> dict
+    controller.get_status()               -> dict
+    controller.start() / controller.stop()
 """
 
 import logging
@@ -24,6 +35,9 @@ from beko_protocol import (
 
 log = logging.getLogger("beko.radio")
 
+# How long to wait after radio_handle.send() before entering the RX wait loop.
+# radio_handle does sleep(0.1) + start_rx() internally, so we need a bit more
+# to ensure the FSK receiver is back in RX mode before STM32 transmits TELEM.
 _POST_TX_RX_SETTLE_S = 0.05
 
 
@@ -37,6 +51,8 @@ class _State:
 
 
 class RadioController:
+    """BEKO central-station radio protocol controller."""
+
     def __init__(self, mode: RadioMode = RadioMode.FSK,
                  aes_key: bytes = AES_KEY):
         self._mode   = mode
@@ -57,10 +73,17 @@ class RadioController:
             "last_rx_ts":   None,
         }
 
+        # _rx_event is set by the RX callback whenever a valid TELEM or ALARM
+        # arrives. send_cmd() waits on it. Always clear BEFORE transmitting so
+        # a frame that arrives during TX is not missed.
         self._rx_event  = threading.Event()
         self._last_frame: Optional[bf.BekoFrame] = None
 
         self._handler: Optional[RadioHandler] = None
+
+    # ------------------------------------------------------------------ #
+    # Lifecycle                                                           #
+    # ------------------------------------------------------------------ #
 
     def start(self):
         log.info("RadioController starting…")
@@ -74,7 +97,15 @@ class RadioController:
             self._handler.cleanup()
         log.info("RadioController stopped")
 
+    # ------------------------------------------------------------------ #
+    # Public command API                                                  #
+    # ------------------------------------------------------------------ #
+
     def send_cmd(self, angle: int, op_code: int = CMD_OP_ABSOLUTE) -> dict:
+        """
+        Send CMD → wait for TELEM → send ACK.
+        Retries up to CMD_MAX_RETRIES on NAK or timeout.
+        """
         with self._cmd_lock:
             last_error = None
 
@@ -82,6 +113,7 @@ class RadioController:
                 if attempt > 0:
                     log.info(f"send_cmd: retry {attempt}/{CMD_MAX_RETRIES - 1}")
 
+                # Clear the event BEFORE TX so we don't miss a fast response.
                 self._rx_event.clear()
                 self._last_frame = None
 
@@ -93,7 +125,13 @@ class RadioController:
                     break
 
                 self._state = _State.CMD_SENT
+
+                # Give radio_handle time to switch back to RX mode after TX.
+                # radio_handle.send() does sleep(0.1) + start_rx() internally;
+                # we add a small extra margin so the FSK RX is fully active
+                # before STM32 begins transmitting its TELEM response.
                 sleep(_POST_TX_RX_SETTLE_S)
+
                 frame = self._wait_for_frame()
 
                 if frame is None:
@@ -102,6 +140,7 @@ class RadioController:
                     self._state = _State.RETRY
                     continue
 
+                # STM32 rejected the command
                 if frame.has_nak:
                     last_error = "NAK: STM32 rejected command"
                     log.warning(last_error)
@@ -109,6 +148,7 @@ class RadioController:
                     self._state = _State.RETRY
                     continue
 
+                # Alarm received instead of TELEM
                 if frame.type == FRAME_TYPE_ALARM:
                     alarm = bf.parse_alarm_payload(frame.plaintext)
                     last_error = (
@@ -117,8 +157,10 @@ class RadioController:
                     )
                     log.warning(last_error)
                     self._state = _State.ALARM_ACTIVE
+                    # Don't retry on alarm — operator must unlock first
                     break
 
+                # Normal TELEM — send ACK and return success
                 telem = bf.parse_telem_payload(frame.plaintext)
                 self._send_ack_frame(result=0, flags=FRAME_FLAG_ACK)
                 self._state = _State.ACK_SENT
@@ -145,6 +187,7 @@ class RadioController:
                     "error":        None,
                 }
 
+            # All retries exhausted
             self._state = _State.IDLE
             return {
                 "ok":           False,
@@ -155,6 +198,7 @@ class RadioController:
             }
 
     def send_unlock(self) -> dict:
+        """Send ACK+UNLOCK to release a locked/alarmed node."""
         with self._cmd_lock:
             try:
                 self._rx_event.clear()
@@ -171,6 +215,7 @@ class RadioController:
                 return {"ok": False, "error": str(e)}
 
     def send_lock(self) -> dict:
+        """Send ACK+LOCK (emergency stop from operator)."""
         with self._cmd_lock:
             try:
                 self._send_ack_frame(result=0, flags=FRAME_FLAG_LOCK)
@@ -182,6 +227,10 @@ class RadioController:
     def get_status(self) -> dict:
         with self._status_lock:
             return dict(self._status)
+
+    # ------------------------------------------------------------------ #
+    # Internal frame builders                                             #
+    # ------------------------------------------------------------------ #
 
     def _send_cmd_frame(self, angle: int, op_code: int):
         payload   = bf.build_cmd_payload(op_code, angle)
@@ -213,13 +262,25 @@ class RadioController:
         log.info(f"TX ACK flags=0x{flags:02X} seq={self._tx_seq - 1}")
         self._handler.send(raw_frame.decode('latin-1'))
 
+    # ------------------------------------------------------------------ #
+    # RX wait                                                             #
+    # ------------------------------------------------------------------ #
+
     def _wait_for_frame(self) -> Optional[bf.BekoFrame]:
+        """
+        Block until a TELEM or ALARM arrives from STM32, or timeout.
+        The caller must clear _rx_event before TX.
+        """
         timeout_s = TELEM_TIMEOUT_MS / 1000.0
         received  = self._rx_event.wait(timeout=timeout_s)
         if not received:
             log.warning(f"_wait_for_frame: timeout after {timeout_s:.1f} s")
             return None
         return self._last_frame
+
+    # ------------------------------------------------------------------ #
+    # RX callback — called from radio_handle GPIO interrupt thread        #
+    # ------------------------------------------------------------------ #
 
     def _on_received(self, data: str, rssi=None, index=None):
         """
@@ -237,6 +298,7 @@ class RadioController:
 
         log.debug(f"parsed: type=0x{frame.type:02X} dst=0x{frame.dst:02X} src=0x{frame.src:02X} flags=0x{frame.flags:02X}")
 
+        # Drop frames not addressed to us
         if frame.dst != ADDR_CENTRAL:
             log.debug(f"ignored: dst=0x{frame.dst:02X} != ADDR_CENTRAL=0x{ADDR_CENTRAL:02X}")
             return

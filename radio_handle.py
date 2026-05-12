@@ -87,41 +87,32 @@ class RadioHandler:
         """
         Force SX1276 into FSK RX continuous regardless of current state.
 
-        Root cause of the missed-TELEM bug: the old code called
-        SX1276SetRx_fsk() AFTER entering RXCONT.  That call writes to
-        RXCONFIG which triggers a receiver restart (hardware briefly drops
-        to FSRx/0x04).  If the TELEM frame completed reception during that
-        window, PayloadReady was already high when DIO0 was finally mapped
-        to it — no rising edge, no GPIO interrupt, 5 s timeout.
-
-        Fixed sequence:
-          1. STDBY  — stop any ongoing reception
-          2. Drain FIFO while PayloadReady is set (discard stale data)
-          3. Configure DIO0→PayloadReady BEFORE entering RX so the GPIO
-             edge detector is armed before the first packet can arrive
+        Sequence:
+          1. STDBY — halt any ongoing RX/TX
+          2. Flush FIFO atomically via FifoOverrun flag (clears FIFO and
+             PayloadReady in one register write — avoids unreliable
+             byte-by-byte drain that left stale 0x29 data behind)
+          3. Configure DIO0→PayloadReady in STDBY, BEFORE entering RX so
+             the GPIO edge detector is armed and no rising edge can be missed
           4. Clear driver RX buffers
           5. Set _mode flag so _handle_interrupt() accepts callbacks
-          6. Enter RXCONT — interrupt is already armed, no edge can be missed
-          7. If PayloadReady is already set after entering RX (packet was in
-             the FIFO before the drain, or arrived during the µs transition),
-             manually trigger _handle_interrupt() — there will be no rising
-             edge on DIO0 for an already-high signal.
+          6. Enter RXCONT, then poll until hardware confirms 0x05.
+             Without polling the radio can linger at 0x04 (FSRx / PLL
+             locking) and calling RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK in
+             that state has no effect — leaving the radio deaf.
         """
         with self.fsk_handler._hw_lock:
             # 1. Force STDBY
             self._spi_w(_REG_01_OP_MODE, _MODE_STDBY)
             sleep(0.010)
 
-            # 2. Drain FIFO — read until PayloadReady=0 or 64 bytes
-            for _ in range(64):
-                if not (self._spi_r(_REG_13_IRQ2) & 0x04):
-                    break
-                self._spi_r(_REG_00_FIFO)
+            # 2. Flush FIFO: writing FifoOverrun bit (bit 4) to RegIrqFlags2
+            #    atomically empties the FIFO and clears PayloadReady.
+            self._spi_w(_REG_13_IRQ2, 0x10)
+            sleep(0.002)
 
-            # 3. DIO mapping: DIO0→PayloadReady (bits[7:6]=00 in FSK RX).
-            #    Done here, in STDBY, BEFORE entering RX.  The radio cannot
-            #    receive in STDBY so no packet can arrive between the mapping
-            #    write and the mode switch — no edge can be missed.
+            # 3. DIO0→PayloadReady (bits[7:6]=00 in FSK RX) configured while
+            #    still in STDBY — radio cannot receive here, so no edge missed.
             self._spi_w(_REG_40_DIOMAP1,
                         (self._spi_r(_REG_40_DIOMAP1) & 0x03) | 0x0C)
             self._spi_w(_REG_41_DIOMAP2,
@@ -131,24 +122,21 @@ class RadioHandler:
             self.fsk_handler._rx_buffer      = []
             self.fsk_handler._rx_payload_len = 0
             self.fsk_handler._rssi           = 0
-
-            # 5. Sync _mode BEFORE the register write so _handle_interrupt()
-            #    accepts callbacks the instant the radio starts receiving.
             self.fsk_handler._mode = _MODE_RXCONT
 
-            # 6. Enter RX continuous
+            # 5. Enter RX continuous, then poll until hardware confirms 0x05.
+            #    The chip briefly passes through FSRx (0x04) while the PLL
+            #    locks; reading back 0x04 and treating it as "done" leaves
+            #    the radio deaf to incoming packets.
             self._spi_w(_REG_01_OP_MODE, _MODE_RXCONT)
-            sleep(0.010)
+            for _ in range(20):
+                sleep(0.001)
+                if (self._spi_r(_REG_01_OP_MODE) & 0x07) == _MODE_RXCONT:
+                    break
 
         mode = self._spi_r(_REG_01_OP_MODE)
         irq2 = self._spi_r(_REG_13_IRQ2)
         print(f"  [RX] mode=0x{mode:02X}  PayloadReady={bool(irq2 & 0x04)}")
-
-        # 7. PayloadReady already high → DIO0 was high before GPIO edge
-        #    detector armed (or drain missed a packet).  No rising edge will
-        #    fire, so manually trigger the read.
-        if irq2 & 0x04:
-            self.fsk_handler._handle_interrupt(None)
 
     # ------------------------------------------------------------------ #
 
