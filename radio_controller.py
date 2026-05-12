@@ -229,18 +229,55 @@ class RadioController:
             }
 
     def send_unlock(self) -> dict:
-        """Send ACK+UNLOCK to release a locked/alarmed node."""
+        """Send UNLOCK, then wait for the TELEM/ALARM response and ACK it."""
         with self._cmd_lock:
             try:
                 self._rx_event.clear()
                 self._last_frame = None
                 self._send_ack_frame(result=0, flags=FRAME_FLAG_UNLOCK)
-                self._state = _State.IDLE
-                with self._status_lock:
-                    self._status["alarm_code"]  = None
-                    self._status["alarm_angle"] = None
-                    self._status["state"]       = _State.IDLE
+
+                sleep(_POST_TX_RX_SETTLE_S)
+                frame = self._wait_for_frame()
+
+                if frame is None:
+                    log.warning("send_unlock: no response from STM32")
+                    return {"ok": False, "error": "Timeout: no response after UNLOCK"}
+
+                if frame.type == FRAME_TYPE_TELEM:
+                    telem = bf.parse_telem_payload(frame.plaintext)
+                    sleep(0.3)
+                    self._send_ack_frame(result=0, flags=FRAME_FLAG_ACK)
+                    with self._status_lock:
+                        self._status.update({
+                            "state":        _State.IDLE,
+                            "actual_angle": telem["actual_angle"],
+                            "servo_status": telem["servo_status"],
+                            "alarm_code":   None,
+                            "alarm_angle":  None,
+                            "link_ok":      True,
+                            "last_rx_ts":   time(),
+                        })
+                    log.info(f"UNLOCK ok: angle={telem['actual_angle']}° "
+                             f"status={telem['servo_status']}")
+                    return {"ok": True, "error": None}
+
+                if frame.type == FRAME_TYPE_ALARM:
+                    alarm = bf.parse_alarm_payload(frame.plaintext)
+                    code_name = ALARM_CODE_NAMES.get(
+                        alarm["alarm_code"], f"0x{alarm['alarm_code']:02X}"
+                    )
+                    log.warning(f"UNLOCK: STM32 still in alarm — {code_name}")
+                    with self._status_lock:
+                        self._status.update({
+                            "state":       _State.ALARM_ACTIVE,
+                            "alarm_code":  alarm["alarm_code"],
+                            "alarm_angle": alarm["angle_at_alarm"],
+                            "last_rx_ts":  time(),
+                        })
+                    return {"ok": False, "error": f"STM32 still in alarm: {code_name}"}
+
                 return {"ok": True, "error": None}
+
             except Exception as e:
                 log.error(f"send_unlock error: {e}")
                 return {"ok": False, "error": str(e)}
