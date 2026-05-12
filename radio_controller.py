@@ -132,7 +132,7 @@ class RadioController:
                 # before STM32 begins transmitting its TELEM response.
                 sleep(_POST_TX_RX_SETTLE_S)
 
-                # frame = self._wait_for_frame()
+                frame = self._wait_for_frame()
 
                 if frame is None:
                     last_error = "Timeout: no TELEM received"
