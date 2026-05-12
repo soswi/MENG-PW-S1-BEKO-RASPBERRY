@@ -1,5 +1,6 @@
 """
 MIT License
+
 Copyright (c) 2024 BEER-TEAM (Piotr Polnau, Jan Sosulski, Piotr Baprawski)
 """
 
@@ -14,26 +15,33 @@ from datetime import datetime
 _FSK_FRAME_AIR_TIME_S = 0.130
 
 _REG_01_OP_MODE    = 0x01
-_REG_3E_IRQ_FLAGS1 = 0x3E
+_REG_3E_IRQ_FLAGS1 = 0x3E   # bit7=ModeReady  bit4=PllLock  bit6=RxReady
 _MODE_SLEEP        = 0x00
 _MODE_STDBY        = 0x01
 _MODE_RXCONT       = 0x05
 
+
 def _ts():
     return datetime.now().strftime('%H:%M:%S.%f')[:-3]
 
+
 def _chip_status(fsk):
+    """Read and format RegOpMode + RegIrqFlags1 in one call."""
     mode = fsk._spi_read(_REG_01_OP_MODE)
     irq1 = fsk._spi_read(_REG_3E_IRQ_FLAGS1)
-    pll   = (irq1 >> 4) & 1
-    rdy   = (irq1 >> 7) & 1
+    pll  = (irq1 >> 4) & 1
+    rdy  = (irq1 >> 7) & 1
     rxrdy = (irq1 >> 6) & 1
     return mode, f"hw=0x{mode:02X}({mode & 0x07}) IrqF1=0x{irq1:02X} PllLock={pll} ModeReady={rdy} RxReady={rxrdy}"
+
 
 class RadioMode(Enum):
     FSK  = auto()
     LORA = auto()
-    def __str__(self): return self.name
+
+    def __str__(self) -> str:
+        return self.name
+
 
 class RadioHandler:
     def __init__(self, mode, data_callback):
@@ -60,11 +68,27 @@ class RadioHandler:
             print(f"[{_ts()}] [INIT] FSK ready — {s}")
 
         elif self.mode == RadioMode.LORA:
-            self.lora_handler = LoRa(...)
+            self.lora_handler = LoRa(
+                spi_channel=radio_defines.SPI_CHANNEL,
+                interrupt_pin=radio_defines.INTERRUPT_PIN,
+                my_address=radio_defines.LORA_ADDR,
+                spi_port=radio_defines.SPI_PORT,
+                reset_pin=radio_defines.RESET_PIN,
+                freq=radio_defines.LORA_FREQ,
+                tx_power=radio_defines.LORA_POWER,
+                modem_config=radio_defines.LORA_MODEM_CONFIG,
+                acks=radio_defines.LORA_ACKS,
+                receive_all=True,
+            )
             self.lora_handler.on_recv = self.handle_received_data
             self.lora_handler.set_mode_rx()
 
+        else:
+            raise ValueError("Invalid mode. Choose 'fsk' or 'lora'.")
+
         print(f"[{_ts()}] {self.mode} handler is running... Waiting for data.")
+
+    # ------------------------------------------------------------------ #
 
     def _enter_fsk_rx(self):
         self.fsk_handler._spi_write(_REG_01_OP_MODE, _MODE_SLEEP)
@@ -82,6 +106,7 @@ class RadioHandler:
 
     def _reinit_fsk_rx(self):
         print(f"[{_ts()}] [REINIT] --- begin ---")
+
         GPIO.remove_event_detect(radio_defines.INTERRUPT_PIN)
         _, s = _chip_status(self.fsk_handler)
         print(f"[{_ts()}] [REINIT] event_detect removed — {s} sw={self.fsk_handler._mode}")
@@ -90,20 +115,28 @@ class RadioHandler:
         self.fsk_handler._mode = _MODE_SLEEP
 
         self.fsk_handler.SX1276Init()
+        _, s = _chip_status(self.fsk_handler)
+        print(f"[{_ts()}] [REINIT] after SX1276Init    — {s}")
+
         self.fsk_handler.SX1276SetChannel()
         self.fsk_handler.SX1276SetTxConfig(fixLEN=radio_defines.FSK_FIX_LEN)
         self.fsk_handler.SX1276SetRxConfig(
             fixLEN=radio_defines.FSK_FIX_LEN,
             payload_len=radio_defines.FSK_PAYLOAD_LEN,
         )
-        self._enter_fsk_rx()
+        _, s = _chip_status(self.fsk_handler)
+        print(f"[{_ts()}] [REINIT] after SetRxConfig   — {s}")
 
-        # Re-arm interrupt BEFORE poll — never miss a PayloadReady
+        self._enter_fsk_rx()
+        _, s = _chip_status(self.fsk_handler)
+        print(f"[{_ts()}] [REINIT] after _enter_fsk_rx — {s} sw={self.fsk_handler._mode}")
+
+        # Re-arm interrupt BEFORE poll so we never miss a PayloadReady.
         GPIO.add_event_detect(radio_defines.INTERRUPT_PIN, GPIO.RISING,
                               callback=self.fsk_handler._handle_interrupt)
         print(f"[{_ts()}] [REINIT] interrupt re-armed — chip now listening")
 
-        # Diagnostic poll only — does NOT block reception
+        # Diagnostic poll only — does NOT block reception.
         mode_ok = False
         for i in range(10):
             sleep(0.004)
@@ -115,6 +148,8 @@ class RadioHandler:
 
         _, s = _chip_status(self.fsk_handler)
         print(f"[{_ts()}] [REINIT] --- end poll={'OK(0x05)' if mode_ok else 'scanning(0x04)'} {s} ---")
+
+    # ------------------------------------------------------------------ #
 
     def start_rx(self):
         if self.mode == RadioMode.FSK:
