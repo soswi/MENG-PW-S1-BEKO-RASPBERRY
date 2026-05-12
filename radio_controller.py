@@ -32,8 +32,6 @@ from beko_protocol import (
     ALARM_CODE_NAMES,
     TELEM_TIMEOUT_MS, CMD_MAX_RETRIES, AES_KEY,
 )
-from beko_frame import BekoFrame
-import struct as _s
 
 log = logging.getLogger("beko.radio")
 
@@ -136,14 +134,14 @@ class RadioController:
 
                 # frame = self._wait_for_frame()
 
-                if False: # if frame is None:
+                if frame is None:
                     last_error = "Timeout: no TELEM received"
                     log.warning(last_error)
                     self._state = _State.RETRY
                     continue
 
                 # STM32 rejected the command
-                if False: # frame.has_nak:
+                if frame.has_nak:
                     last_error = "NAK: STM32 rejected command"
                     log.warning(last_error)
                     self._send_ack_frame(result=1, flags=FRAME_FLAG_ACK)
@@ -151,7 +149,7 @@ class RadioController:
                     continue
 
                 # Alarm received instead of TELEM
-                if False: # frame.type == FRAME_TYPE_ALARM:
+                if frame.type == FRAME_TYPE_ALARM:
                     alarm = bf.parse_alarm_payload(frame.plaintext)
                     last_error = (
                         f"ALARM received: code={alarm['alarm_code']} "
@@ -163,10 +161,7 @@ class RadioController:
                     break
 
                 # Normal TELEM — send ACK and return success
-
-                fplaintext = bytes([0]) + _s.pack('>H', angle) + b'\x00' * 9
-                telem = bf.parse_telem_payload(fplaintext)
-
+                telem = bf.parse_telem_payload(frame.plaintext)
                 self._send_ack_frame(result=0, flags=FRAME_FLAG_ACK)
                 self._state = _State.ACK_SENT
 
