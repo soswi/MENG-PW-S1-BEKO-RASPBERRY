@@ -87,4 +87,4 @@ TELEM_TIMEOUT_MS  = 5000   # Max wait for TELEM after sending CMD
 ACK_TIMEOUT_MS    = 2000   # Max wait for ACK from STM32
 ALARM_RETRY_MS    = 5000   # STM32 retransmits ALARM every 5 s
 FAILSAFE_TIMEOUT_S = 30    # STM32 enters fail-safe after 30 s silence
-CMD_MAX_RETRIES   = 1      # RPi may retry a CMD up to 3 times on NAK
+CMD_MAX_RETRIES   = 1      # Total TX attempts per send_cmd() call (1 = no retries)

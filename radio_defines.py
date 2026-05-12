@@ -1,4 +1,4 @@
-"""""
+"""
 MIT License
 
 Copyright (c) 2024 BEER-TEAM (Piotr Polnau, Jan Sosulski, Piotr Baprawski)
