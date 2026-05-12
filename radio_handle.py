@@ -87,21 +87,24 @@ class RadioHandler:
         """
         Full hardware reset + reconfigure to reliably enter FSK RxContinuous.
 
-        Writing RXCONT (0x05) directly after TX leaves the chip stuck in
-        FSRx (0x04) because PLL calibration fails to complete. A hardware
-        reset clears the stuck PLL state and re-runs internal calibration;
-        the full register reconfiguration restores everything wiped by reset.
+        Root cause: after set_mode_rx_fsk() writes 0x05 and sets
+        _mode=RXCONTINUOUS, a queued DIO0 interrupt from the TxDone cycle
+        unblocks and fires while the chip is still in FSRx (0x04, PLL
+        locking). The handler writes RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK
+        during FSRx which aborts the transition and drops the chip to
+        SLEEP (0x00). Fix: poll for hardware mode=0x05 inside _hw_lock so
+        the interrupt handler cannot touch RXCONFIG until PLL lock is done.
         """
-        # Pulse RESET_PIN LOW — separate GPIO line, no SPI lock needed
+        # Hardware reset — separate GPIO line, no SPI lock needed
         GPIO.setup(radio_defines.RESET_PIN, GPIO.OUT)
         GPIO.output(radio_defines.RESET_PIN, GPIO.LOW)
         sleep(0.010)
         GPIO.output(radio_defines.RESET_PIN, GPIO.HIGH)
         sleep(0.010)
 
-        # Restore all registers wiped by reset, then enter RX.
-        # _hw_lock is an RLock so nested acquisitions inside driver methods are safe.
+        # _hw_lock is an RLock — nested acquisitions inside driver methods are safe.
         with self.fsk_handler._hw_lock:
+            # Restore all registers wiped by the reset
             self.fsk_handler.SX1276Init()
             self.fsk_handler.SX1276SetChannel()
             self.fsk_handler.SX1276SetTxConfig(fixLEN=radio_defines.FSK_FIX_LEN)
@@ -109,8 +112,14 @@ class RadioHandler:
                 fixLEN=radio_defines.FSK_FIX_LEN,
                 payload_len=radio_defines.FSK_PAYLOAD_LEN,
             )
-            # Sets DIO0→PayloadReady, clears RX buffers, enters RXCONT
+            # Set DIO0→PayloadReady, clear RX buffers, write RXCONT to RegOpMode
             self.fsk_handler.SX1276SetRx_fsk()
+            # Poll inside the lock: interrupt handler blocks on _hw_lock here,
+            # so RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK cannot fire during FSRx.
+            for _ in range(50):
+                sleep(0.002)
+                if (self._spi_r(_REG_01_OP_MODE) & 0x07) == _MODE_RXCONT:
+                    break
 
         mode = self._spi_r(_REG_01_OP_MODE)
         irq2 = self._spi_r(_REG_13_IRQ2)
