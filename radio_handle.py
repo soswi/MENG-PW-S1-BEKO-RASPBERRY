@@ -85,54 +85,32 @@ class RadioHandler:
 
     def _force_rx(self):
         """
-        Force SX1276 into FSK RX continuous regardless of current state.
+        Full hardware reset + reconfigure to reliably enter FSK RxContinuous.
 
-        Sequence:
-          1. STDBY — halt any ongoing RX/TX
-          2. Flush FIFO atomically via FifoOverrun flag (clears FIFO and
-             PayloadReady in one register write — avoids unreliable
-             byte-by-byte drain that left stale 0x29 data behind)
-          3. Configure DIO0→PayloadReady in STDBY, BEFORE entering RX so
-             the GPIO edge detector is armed and no rising edge can be missed
-          4. Clear driver RX buffers
-          5. Set _mode flag so _handle_interrupt() accepts callbacks
-          6. Enter RXCONT, then poll until hardware confirms 0x05.
-             Without polling the radio can linger at 0x04 (FSRx / PLL
-             locking) and calling RF_RXCONFIG_RESTARTRXWITHOUTPLLLOCK in
-             that state has no effect — leaving the radio deaf.
+        Writing RXCONT (0x05) directly after TX leaves the chip stuck in
+        FSRx (0x04) because PLL calibration fails to complete. A hardware
+        reset clears the stuck PLL state and re-runs internal calibration;
+        the full register reconfiguration restores everything wiped by reset.
         """
+        # Pulse RESET_PIN LOW — separate GPIO line, no SPI lock needed
+        GPIO.setup(radio_defines.RESET_PIN, GPIO.OUT)
+        GPIO.output(radio_defines.RESET_PIN, GPIO.LOW)
+        sleep(0.010)
+        GPIO.output(radio_defines.RESET_PIN, GPIO.HIGH)
+        sleep(0.010)
+
+        # Restore all registers wiped by reset, then enter RX.
+        # _hw_lock is an RLock so nested acquisitions inside driver methods are safe.
         with self.fsk_handler._hw_lock:
-            # 1. Force STDBY
-            self._spi_w(_REG_01_OP_MODE, _MODE_STDBY)
-            sleep(0.010)
-
-            # 2. Flush FIFO: writing FifoOverrun bit (bit 4) to RegIrqFlags2
-            #    atomically empties the FIFO and clears PayloadReady.
-            self._spi_w(_REG_13_IRQ2, 0x10)
-            sleep(0.002)
-
-            # 3. DIO0→PayloadReady (bits[7:6]=00 in FSK RX) configured while
-            #    still in STDBY — radio cannot receive here, so no edge missed.
-            self._spi_w(_REG_40_DIOMAP1,
-                        (self._spi_r(_REG_40_DIOMAP1) & 0x03) | 0x0C)
-            self._spi_w(_REG_41_DIOMAP2,
-                        (self._spi_r(_REG_41_DIOMAP2) & 0x3E) | 0xC1)
-
-            # 4. Clear driver RX state
-            self.fsk_handler._rx_buffer      = []
-            self.fsk_handler._rx_payload_len = 0
-            self.fsk_handler._rssi           = 0
-            self.fsk_handler._mode = _MODE_RXCONT
-
-            # 5. Enter RX continuous, then poll until hardware confirms 0x05.
-            #    The chip briefly passes through FSRx (0x04) while the PLL
-            #    locks; reading back 0x04 and treating it as "done" leaves
-            #    the radio deaf to incoming packets.
-            self._spi_w(_REG_01_OP_MODE, _MODE_RXCONT)
-            for _ in range(20):
-                sleep(0.001)
-                if (self._spi_r(_REG_01_OP_MODE) & 0x07) == _MODE_RXCONT:
-                    break
+            self.fsk_handler.SX1276Init()
+            self.fsk_handler.SX1276SetChannel()
+            self.fsk_handler.SX1276SetTxConfig(fixLEN=radio_defines.FSK_FIX_LEN)
+            self.fsk_handler.SX1276SetRxConfig(
+                fixLEN=radio_defines.FSK_FIX_LEN,
+                payload_len=radio_defines.FSK_PAYLOAD_LEN,
+            )
+            # Sets DIO0→PayloadReady, clears RX buffers, enters RXCONT
+            self.fsk_handler.SX1276SetRx_fsk()
 
         mode = self._spi_r(_REG_01_OP_MODE)
         irq2 = self._spi_r(_REG_13_IRQ2)
