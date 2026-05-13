@@ -1,0 +1,15 @@
+[Unit]
+Description=BEKO Rotor Web Backend (Flask + RadioController)
+After=network.target
+
+[Service]
+User=centrala
+WorkingDirectory=/home/centrala/MENG-PW-S1-BEKO-WEB/rotor/backend
+ExecStart=/usr/bin/python3 app.py
+Restart=on-failure
+RestartSec=3s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

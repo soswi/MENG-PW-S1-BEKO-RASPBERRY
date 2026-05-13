@@ -359,6 +359,7 @@
           <button class="btn btn-wide btn-danger" onclick="eStop()">⬛ STOP AWARYJNY</button>
           <button class="btn" onclick="testBlock()">SIM. BLOKADA</button>
           <button class="btn" onclick="clearAlarm()">KASUJ ALARM</button>
+          <button class="btn btn-wide" id="restartBtn" onclick="restartBackend()" style="letter-spacing:0.1em;font-size:13px;">↺ RESTART SERWISU</button>
         </div>
       </div>
 
@@ -641,6 +642,38 @@
     function setStatus(type, text) {
       document.getElementById('statusDot').className   = 'status-dot' + (type !== 'ok' ? ' ' + type : '');
       document.getElementById('statusText').textContent = text;
+    }
+
+    let _restartPollTimer = null;
+
+    function restartBackend() {
+      if (!confirm('Restart serwisu beko-web?\nSerwis zostanie ponownie uruchomiony (~5s przerwy.')) return;
+      const btn = document.getElementById('restartBtn');
+      btn.disabled = true;
+      btn.textContent = '↺ RESTARTUJĘ...';
+      setStatus('warn', 'RESTART — czekam na wznowienie...');
+      addLog('RESTART → serwis wyłącza się…', 'warn');
+
+      fetch('/api/restart', { method: 'POST' })
+        .catch(() => {})  // server may die before response arrives — that's fine
+        .finally(() => {
+          // Start polling every 1 s until the server responds to /api/status
+          if (_restartPollTimer) clearInterval(_restartPollTimer);
+          _restartPollTimer = setInterval(() => {
+            fetch('/api/status?after=0')
+              .then(r => r.json())
+              .then(() => {
+                clearInterval(_restartPollTimer);
+                _restartPollTimer = null;
+                lastEventId = 0;  // reset so we pick up fresh events from the new process
+                btn.disabled = false;
+                btn.textContent = '↺ RESTART SERWISU';
+                setStatus('ok', 'ŁĄCZE AKTYWNE / FSK 868 MHz');
+                addLog('RESTART OK — serwis wznowiony', 'ok');
+              })
+              .catch(() => {});  // still down — keep polling
+          }, 1000);
+        });
     }
 
     let logLines = [];

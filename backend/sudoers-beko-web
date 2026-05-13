@@ -1,0 +1,4 @@
+# Allow the centrala user to restart/start/stop/status beko-web without a password.
+# Install: sudo cp sudoers-beko-web /etc/sudoers.d/beko-web
+#          sudo chmod 440 /etc/sudoers.d/beko-web
+centrala ALL=(ALL) NOPASSWD: /bin/systemctl restart beko-web, /bin/systemctl start beko-web, /bin/systemctl stop beko-web, /bin/systemctl status beko-web

@@ -15,12 +15,14 @@ Endpoints:
     POST /api/stop               → emergency LOCK
     POST /api/unlock             → send UNLOCK and wait for TELEM/ALARM
     POST /api/alarm/clear        → alias for /api/unlock
+    POST /api/restart            → restart the beko-web systemd service
 """
 
 import os
 import sys
 import logging
 import signal
+import subprocess
 import collections
 import threading
 
@@ -173,6 +175,26 @@ def post_stop():
     _evt("alarm", "LOCK → emergency stop")
     result = controller.send_lock()
     return jsonify(result), (200 if result["ok"] else 500)
+
+
+@app.route("/api/restart", methods=["POST"])
+def post_restart():
+    """
+    Restart the beko-web systemd service.
+    Responds immediately; actual restart happens 1 s later so the response
+    has time to reach the browser before the process dies.
+    Requires: sudo systemctl restart beko-web  (passwordless via /etc/sudoers.d/beko-web)
+    """
+    logger.info("Restart requested via web UI")
+    _evt("warn", "RESTART → serwis zostanie uruchomiony ponownie…")
+
+    def _do_restart():
+        import time
+        time.sleep(1)
+        subprocess.Popen(["sudo", "systemctl", "restart", "beko-web"])
+
+    threading.Thread(target=_do_restart, daemon=True).start()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/unlock", methods=["POST"])
