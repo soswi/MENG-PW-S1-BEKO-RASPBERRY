@@ -22,17 +22,19 @@ import sys
 import logging
 import signal
 
-# Add the repo root to path so radio_controller and friends are importable
-# regardless of where the user cd's from.
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _REPO_ROOT)
+# Radio layer lives in a separate repo — add it to path explicitly.
+_RADIO_ROOT = "/home/centrala/rfm95/MENG-PW-S1-BEKO-RASPBERRY"
+sys.path.insert(0, _RADIO_ROOT)
+
+# Web repo root (parent of backend/) — used only for the logs directory.
+_WEB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 from flask import Flask, jsonify, request, render_template
 from radio_controller import RadioController, RadioMode
 from beko_protocol import CMD_OP_ABSOLUTE, ALARM_CODE_NAMES
 
 # ── Logging ──────────────────────────────────────────────────────────────────
-_LOGS_DIR = os.path.join(_REPO_ROOT, "logs")
+_LOGS_DIR = os.path.join(_WEB_ROOT, "logs")
 os.makedirs(_LOGS_DIR, exist_ok=True)
 
 logging.basicConfig(
@@ -134,7 +136,8 @@ if __name__ == "__main__":
     logger.info("╔════════════════════════════════════════════════════════╗")
     logger.info("║     SYSTEM BEKO — Backend Rotor Antenowy               ║")
     logger.info("╚════════════════════════════════════════════════════════╝")
-    logger.info(f"Repo root : {_REPO_ROOT}")
+    logger.info(f"Radio root: {_RADIO_ROOT}")
+    logger.info(f"Web root  : {_WEB_ROOT}")
     logger.info(f"Log file  : {os.path.join(_LOGS_DIR, 'events.log')}")
 
     logger.info("Starting RadioController (FSK 868 MHz)...")
