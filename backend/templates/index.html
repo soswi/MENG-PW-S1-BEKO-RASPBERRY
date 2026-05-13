@@ -381,14 +381,15 @@
     const CY = COMPASS_SIZE / 2;
     const R  = 118;
 
-    let actualAngle    = 0;
-    let targetAngle    = 0;
-    let potAngle       = 0;
+    let confirmedAngle = 0;  // last angle acknowledged by STM32 TELEM
+    let actualAngle    = 0;  // compass needle — animates toward targetAngle
+    let targetAngle    = 0;  // operator's current setpoint
+    let potAngle       = 0;  // ADC reading from status poll — verification only
     let blocked        = false;
     let stopped        = false;
     let animFrame;
     let lastAlarmState = false;
-    let lastEventId    = 0;  // tracks last seen backend event id
+    let lastEventId    = 0;
 
     const canvas = document.getElementById('compassCanvas');
     const ctx    = canvas.getContext('2d');
@@ -534,54 +535,62 @@
       const diff = ((targetAngle - actualAngle + 540) % 360) - 180;
       if (Math.abs(diff) < 0.5) {
         actualAngle = targetAngle;
-        potAngle    = actualAngle;
         updateUI();
         return;
       }
       const step  = Math.sign(diff) * Math.min(Math.abs(diff), 1.5);
       actualAngle = (actualAngle + step + 360) % 360;
-      potAngle    = actualAngle + (Math.random() - 0.5) * 1.5;
-      potAngle    = Math.max(0, Math.min(180, potAngle));
       updateUI();
       animFrame = requestAnimationFrame(animate);
     }
 
     // ── Core command sender ────────────────────────────────────────────────────
-    // All azimuth buttons funnel through goTo().
-    // goTo() starts a local preview animation immediately, then POSTs to the
-    // backend. When the real TELEM comes back the actual_angle is snapped to
-    // the confirmed value. Status polling at 500 ms handles intermediate updates.
+    // The compass needle shows confirmedAngle — the last setpoint acknowledged
+    // by STM32 TELEM. On a new command the needle animates toward targetAngle
+    // as a preview. If TELEM never arrives (timeout / ALARM) the needle reverts
+    // to confirmedAngle. ADC actual_angle from the status poll is verification
+    // only and never drives the compass needle.
 
     function goTo(deg) {
       if (stopped) return;
       blocked = false;
       cancelAnimationFrame(animFrame);
+      const prevConfirmed = confirmedAngle;
       targetAngle = ((deg % 360) + 360) % 360;
       addLog('CMD→' + formatDeg(targetAngle), 'ok');
       setStatus('warn', 'WYSYŁANIE...');
-      animate();  // preview animation while radio transaction is in flight
+      animate();  // preview — needle moves toward targetAngle while we wait
 
+      const sentTarget = targetAngle;  // capture in case nudge fires again mid-flight
       fetch('/api/command', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ azimuth: targetAngle, op_code: 1 }),
+        body:    JSON.stringify({ azimuth: sentTarget, op_code: 1 }),
       })
       .then(r => r.json())
       .then(data => {
         if (data.ok) {
+          // TELEM confirmed — accept operator setpoint as the real angle
+          confirmedAngle = sentTarget;
           if (data.actual_angle !== null && data.actual_angle !== undefined) {
-            actualAngle = data.actual_angle;
-            potAngle    = data.actual_angle;
+            potAngle = data.actual_angle;  // ADC reading → verification panel only
           }
           setStatus('ok', 'ŁĄCZE AKTYWNE / FSK 868 MHz');
           // result logged via backend event "TELEM ←"
         } else {
+          // No confirmation — revert needle to last confirmed position
+          targetAngle = prevConfirmed;
+          cancelAnimationFrame(animFrame);
+          animate();
           setStatus('alarm', 'BŁĄD: ' + data.error);
           // error logged via backend event "ERR:" or "ALARM ←"
         }
         updateUI();
       })
       .catch(e => {
+        targetAngle = prevConfirmed;
+        cancelAnimationFrame(animFrame);
+        animate();
         setStatus('warn', 'BŁĄD SIECI');
         addLog('net err: ' + e.message, 'alarm');
       });
@@ -625,6 +634,14 @@
             blocked        = false;
             stopped        = false;
             lastAlarmState = false;
+            // After UNLOCK the STM32 reports its real position via TELEM.
+            // Sync both confirmed and target so the needle stays put.
+            if (data.actual_angle !== null && data.actual_angle !== undefined) {
+              confirmedAngle = data.actual_angle;
+              targetAngle    = data.actual_angle;
+              actualAngle    = data.actual_angle;
+              potAngle       = data.actual_angle;
+            }
             setStatus('ok', 'ŁĄCZE AKTYWNE / FSK 868 MHz');
             animate();
             // result logged via backend event "UNLOCK OK ←"
@@ -701,10 +718,9 @@
       fetch('/api/status?after=' + lastEventId)
         .then(r => r.json())
         .then(data => {
-          // Snap needle to real telemetry position when available
+          // ADC reading — verification panel only, does NOT drive the compass needle
           if (data.actual_angle !== null && data.actual_angle !== undefined) {
-            actualAngle = data.actual_angle;
-            potAngle    = data.actual_angle;
+            potAngle = data.actual_angle;
           }
 
           // Append backend events to the log panel
