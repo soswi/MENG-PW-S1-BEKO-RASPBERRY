@@ -5,7 +5,7 @@ Flask backend for the BEKO antenna rotator GUI.
 Bridges the browser UI to RadioController (FSK 868 MHz protocol layer).
 
 Run:
-    cd ~/MENG-PW-S1-BEKO-RASPBERRY/backend
+    cd /home/centrala/MENG-PW-S1-BEKO-WEB/rotor/backend
     python3 app.py
 
 Endpoints:
