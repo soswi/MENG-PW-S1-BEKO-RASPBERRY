@@ -39,7 +39,9 @@ log = logging.getLogger("beko.radio")
 # Persist TX sequence counter across restarts so STM32 replay window never rejects.
 _SEQ_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".beko_tx_seq")
 
-# How long to wait after radio_handle.send() returns before entering the RX wait loop.
+# How long to wait after radio_handle.send() before entering the RX wait loop.
+# radio_handle does sleep(0.1) + start_rx() internally, so we need a bit more
+# to ensure the FSK receiver is back in RX mode before STM32 transmits TELEM.
 _POST_TX_RX_SETTLE_S = 0.05
 
 
@@ -75,6 +77,9 @@ class RadioController:
             "last_rx_ts":   None,
         }
 
+        # _rx_event is set by the RX callback whenever a valid TELEM or ALARM
+        # arrives. send_cmd() waits on it. Always clear BEFORE transmitting so
+        # a frame that arrives during TX is not missed.
         self._rx_event  = threading.Event()
         self._last_frame: Optional[bf.BekoFrame] = None
 
@@ -85,6 +90,7 @@ class RadioController:
     # ------------------------------------------------------------------ #
 
     def _load_tx_seq(self) -> int:
+        """Load last-saved TX seq from disk and advance by a gap to skip already-seen values."""
         try:
             with open(_SEQ_FILE, "r") as f:
                 saved = int(f.read().strip())
@@ -96,6 +102,7 @@ class RadioController:
             return 1
 
     def _save_tx_seq(self):
+        """Persist current _tx_seq so next startup won't replay already-used values."""
         try:
             with open(_SEQ_FILE, "w") as f:
                 f.write(str(self._tx_seq))
@@ -147,6 +154,10 @@ class RadioController:
 
                 self._state = _State.CMD_SENT
 
+                # Give radio_handle time to switch back to RX mode after TX.
+                # radio_handle.send() does sleep(0.1) + start_rx() internally;
+                # we add a small extra margin so the FSK RX is fully active
+                # before STM32 begins transmitting its TELEM response.
                 sleep(_POST_TX_RX_SETTLE_S)
 
                 frame = self._wait_for_frame()
@@ -174,6 +185,7 @@ class RadioController:
                     )
                     log.warning(last_error)
                     self._state = _State.ALARM_ACTIVE
+                    # Don't retry on alarm — operator must unlock first
                     break
 
                 # Normal TELEM — send ACK and return success
@@ -217,18 +229,55 @@ class RadioController:
             }
 
     def send_unlock(self) -> dict:
-        """Send ACK+UNLOCK to release a locked/alarmed node."""
+        """Send UNLOCK, then wait for the TELEM/ALARM response and ACK it."""
         with self._cmd_lock:
             try:
                 self._rx_event.clear()
                 self._last_frame = None
                 self._send_ack_frame(result=0, flags=FRAME_FLAG_UNLOCK)
-                self._state = _State.IDLE
-                with self._status_lock:
-                    self._status["alarm_code"]  = None
-                    self._status["alarm_angle"] = None
-                    self._status["state"]       = _State.IDLE
+
+                sleep(_POST_TX_RX_SETTLE_S)
+                frame = self._wait_for_frame()
+
+                if frame is None:
+                    log.warning("send_unlock: no response from STM32")
+                    return {"ok": False, "error": "Timeout: no response after UNLOCK"}
+
+                if frame.type == FRAME_TYPE_TELEM:
+                    telem = bf.parse_telem_payload(frame.plaintext)
+                    sleep(0.3)
+                    self._send_ack_frame(result=0, flags=FRAME_FLAG_ACK)
+                    with self._status_lock:
+                        self._status.update({
+                            "state":        _State.IDLE,
+                            "actual_angle": telem["actual_angle"],
+                            "servo_status": telem["servo_status"],
+                            "alarm_code":   None,
+                            "alarm_angle":  None,
+                            "link_ok":      True,
+                            "last_rx_ts":   time(),
+                        })
+                    log.info(f"UNLOCK ok: angle={telem['actual_angle']}° "
+                             f"status={telem['servo_status']}")
+                    return {"ok": True, "error": None}
+
+                if frame.type == FRAME_TYPE_ALARM:
+                    alarm = bf.parse_alarm_payload(frame.plaintext)
+                    code_name = ALARM_CODE_NAMES.get(
+                        alarm["alarm_code"], f"0x{alarm['alarm_code']:02X}"
+                    )
+                    log.warning(f"UNLOCK: STM32 still in alarm — {code_name}")
+                    with self._status_lock:
+                        self._status.update({
+                            "state":       _State.ALARM_ACTIVE,
+                            "alarm_code":  alarm["alarm_code"],
+                            "alarm_angle": alarm["angle_at_alarm"],
+                            "last_rx_ts":  time(),
+                        })
+                    return {"ok": False, "error": f"STM32 still in alarm: {code_name}"}
+
                 return {"ok": True, "error": None}
+
             except Exception as e:
                 log.error(f"send_unlock error: {e}")
                 return {"ok": False, "error": str(e)}
@@ -288,6 +337,10 @@ class RadioController:
     # ------------------------------------------------------------------ #
 
     def _wait_for_frame(self) -> Optional[bf.BekoFrame]:
+        """
+        Block until a TELEM or ALARM arrives from STM32, or timeout.
+        The caller must clear _rx_event before TX.
+        """
         timeout_s = TELEM_TIMEOUT_MS / 1000.0
         received  = self._rx_event.wait(timeout=timeout_s)
         if not received:
@@ -300,6 +353,10 @@ class RadioController:
     # ------------------------------------------------------------------ #
 
     def _on_received(self, data: str, rssi=None, index=None):
+        """
+        Called by RadioHandler on every received FSK packet.
+        data is a latin-1 str; convert back to bytes with ord().
+        """
         raw = bytes(ord(c) for c in data)
         log.debug(f"RX {len(raw)} B  RSSI={rssi} dBm  #{index}")
 
@@ -311,6 +368,7 @@ class RadioController:
 
         log.debug(f"parsed: type=0x{frame.type:02X} dst=0x{frame.dst:02X} src=0x{frame.src:02X} flags=0x{frame.flags:02X}")
 
+        # Drop frames not addressed to us
         if frame.dst != ADDR_CENTRAL:
             log.debug(f"ignored: dst=0x{frame.dst:02X} != ADDR_CENTRAL=0x{ADDR_CENTRAL:02X}")
             return

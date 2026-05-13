@@ -93,6 +93,13 @@ class RadioHandler:
     # ------------------------------------------------------------------ #
 
     def _enter_fsk_rx(self):
+        """
+        Explicitly write SLEEP (0x00) then call SX1276SetRx_fsk().
+
+        SX1276SetModem() uses RF_OPMODE_MASK=0xF8 which preserves bit 3
+        (LowFrequencyModeOn). For safety we write 0x00 directly so
+        set_mode_rx_fsk() always reads a clean value and writes 0x05.
+        """
         self.fsk_handler._spi_write(_REG_01_OP_MODE, _MODE_SLEEP)
         self.fsk_handler._mode = _MODE_SLEEP
         self.fsk_handler.SX1276SetRx_fsk()
