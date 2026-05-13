@@ -386,7 +386,8 @@
     let blocked        = false;
     let stopped        = false;
     let animFrame;
-    let lastAlarmState = false;  // edge-detect for alarm log entries
+    let lastAlarmState = false;
+    let lastEventId    = 0;  // tracks last seen backend event id
 
     const canvas = document.getElementById('compassCanvas');
     const ctx    = canvas.getContext('2d');
@@ -572,10 +573,10 @@
             potAngle    = data.actual_angle;
           }
           setStatus('ok', 'ŁĄCZE AKTYWNE / FSK 868 MHz');
-          addLog('OK→' + formatDeg(data.actual_angle) + ' srv=' + data.servo_status, 'ok');
+          // result logged via backend event "TELEM ←"
         } else {
           setStatus('alarm', 'BŁĄD: ' + data.error);
-          addLog('ERR: ' + data.error, 'alarm');
+          // error logged via backend event "ERR:" or "ALARM ←"
         }
         updateUI();
       })
@@ -624,11 +625,11 @@
             stopped        = false;
             lastAlarmState = false;
             setStatus('ok', 'ŁĄCZE AKTYWNE / FSK 868 MHz');
-            addLog('alarm skasowany', 'ok');
             animate();
+            // result logged via backend event "UNLOCK OK ←"
           } else {
             setStatus('alarm', 'UNLOCK NIEUDANY: ' + data.error);
-            addLog('UNLOCK ERR: ' + data.error, 'alarm');
+            // failure logged via backend event "UNLOCK FAIL:"
           }
         })
         .catch(e => {
@@ -664,7 +665,7 @@
 
     // ── Status polling (500 ms) ────────────────────────────────────────────────
     setInterval(() => {
-      fetch('/api/status')
+      fetch('/api/status?after=' + lastEventId)
         .then(r => r.json())
         .then(data => {
           // Snap needle to real telemetry position when available
@@ -673,22 +674,24 @@
             potAngle    = data.actual_angle;
           }
 
-          // Edge-detect alarm state so we only log once per alarm event
+          // Append backend events to the log panel
+          (data.events || []).forEach(e => {
+            addLog(e.msg, e.kind);
+            if (e.id > lastEventId) lastEventId = e.id;
+          });
+
+          // Edge-detect alarm for status dot + stopped flag
+          // (the log entry itself comes via backend event)
           if (data.alarm && !lastAlarmState) {
             lastAlarmState = true;
             stopped = true;
             cancelAnimationFrame(animFrame);
             setStatus('alarm', 'ALARM: ' + (data.alarm_msg || 'BŁĄD'));
-            addLog(
-              'ALARM: ' + (data.alarm_msg || '?') +
-              ' @ ' + formatDeg(data.alarm_angle || 0),
-              'alarm'
-            );
           } else if (!data.alarm) {
             lastAlarmState = false;
           }
 
-          // Update status indicator only when we are not in a user-triggered state
+          // Update status indicator only when not in a user-triggered state
           if (!data.alarm && !stopped && !blocked) {
             if (data.state && data.state !== 'IDLE') {
               setStatus('warn', 'WYSYŁANIE...');
