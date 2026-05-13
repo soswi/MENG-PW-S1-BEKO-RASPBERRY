@@ -555,10 +555,7 @@
       .then(r => r.json())
       .then(data => {
         if (data.ok) {
-          const real = (data.actual_angle !== null && data.actual_angle !== undefined)
-                       ? data.actual_angle : sentTarget;
-          setAngle(real);
-          potAngle = real;
+          setAngle(sentTarget);
           setStatus('ok', 'ŁĄCZE AKTYWNE / FSK 868 MHz');
         } else {
           setAngle(prevConfirmed);
