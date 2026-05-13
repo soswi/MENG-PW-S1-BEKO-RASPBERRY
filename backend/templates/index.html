@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rotor Antenowy — BEKO</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #f5f4f0;
+      --surface:   #ffffff;
+      --border:    rgba(0,0,0,0.12);
+      --border2:   rgba(0,0,0,0.22);
+      --text:      #111111;
+      --muted:     #666666;
+      --hint:      #999999;
+      --green:     #0f6e56;
+      --green-dot: #1D9E75;
+      --amber:     #BA7517;
+      --red:       #a32d2d;
+      --red-bg:    #fcebeb;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:        #111111;
+        --surface:   #1a1a1a;
+        --border:    rgba(255,255,255,0.1);
+        --border2:   rgba(255,255,255,0.22);
+        --text:      #f0ede8;
+        --muted:     #888888;
+        --hint:      #555555;
+        --green:     #5DCAA5;
+        --green-dot: #1D9E75;
+        --amber:     #EF9F27;
+        --red:       #E24B4A;
+        --red-bg:    rgba(226,75,74,0.1);
+      }
+    }
+
+    html, body {
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Barlow Condensed', sans-serif;
+    }
+
+    body {
+      padding: 2rem 1.5rem;
+      max-width: 820px;
+      margin: 0 auto;
+    }
+
+    /* ── HEADER ── */
+    .header {
+      border-bottom: 1px solid var(--border2);
+      padding-bottom: 0.75rem;
+      margin-bottom: 1.75rem;
+    }
+    .header-top {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+    }
+    .system-tag {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.15em;
+      color: var(--muted);
+      border: 0.5px solid var(--border2);
+      padding: 2px 8px;
+    }
+    h1 {
+      font-size: 24px;
+      font-weight: 300;
+      letter-spacing: 0.05em;
+      color: var(--text);
+    }
+    .subtitle {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 11px;
+      color: var(--hint);
+      letter-spacing: 0.08em;
+      margin-top: 4px;
+    }
+
+    /* ── LAYOUT ── */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr 260px;
+      gap: 1.5rem;
+      align-items: start;
+    }
+
+    @media (max-width: 600px) {
+      .main-grid { grid-template-columns: 1fr; }
+    }
+
+    /* ── COMPASS ── */
+    .compass-area {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    canvas#compassCanvas { display: block; }
+
+    .az-row {
+      display: flex;
+      gap: 1.5rem;
+      align-items: flex-end;
+    }
+    .az-col { text-align: center; }
+    .az-label {
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      color: var(--hint);
+      margin-bottom: 2px;
+    }
+    .az-val {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 30px;
+      color: var(--text);
+    }
+    .az-val.target {
+      color: var(--muted);
+      font-size: 22px;
+    }
+    .az-sep {
+      font-size: 22px;
+      color: var(--hint);
+      padding-bottom: 2px;
+    }
+    .delta-badge {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 11px;
+      padding: 2px 7px;
+      border: 0.5px solid var(--border2);
+      color: var(--muted);
+      align-self: center;
+    }
+    .delta-badge.alarm { border-color: var(--red); color: var(--red); }
+
+    /* ── LOG ── */
+    .log-area {
+      width: 100%;
+      border: 0.5px solid var(--border);
+      background: var(--surface);
+      padding: 0.75rem 1rem;
+    }
+    .panel-label {
+      font-size: 10px;
+      letter-spacing: 0.15em;
+      color: var(--hint);
+      font-family: 'Share Tech Mono', monospace;
+      margin-bottom: 0.6rem;
+    }
+    .log-list {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      max-height: 90px;
+      overflow-y: auto;
+    }
+    .log-entry { letter-spacing: 0.03em; }
+    .log-entry.alarm { color: var(--red); }
+    .log-entry.warn  { color: var(--amber); }
+    .log-entry.ok    { color: var(--green); }
+
+    /* ── CONTROLS ── */
+    .controls-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .panel-block {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      padding: 0.9rem 1rem;
+    }
+    .btn-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+    .btn {
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: 15px;
+      font-weight: 400;
+      letter-spacing: 0.05em;
+      background: transparent;
+      border: 0.5px solid var(--border2);
+      color: var(--text);
+      padding: 8px 0;
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    .btn:hover  { background: var(--bg); }
+    .btn:active { transform: scale(0.97); }
+    .btn-wide   { grid-column: 1 / -1; font-size: 13px; letter-spacing: 0.1em; padding: 9px 0; }
+    .btn-danger { border-color: var(--red); color: var(--red); }
+    .btn-danger:hover { background: var(--red-bg); }
+
+    .target-input-row { display: flex; gap: 6px; align-items: center; }
+
+    input[type="number"].az-input {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 18px;
+      width: 100%;
+      background: transparent;
+      border: 0.5px solid var(--border2);
+      color: var(--text);
+      padding: 7px 10px;
+      outline: none;
+    }
+    input[type="number"].az-input:focus { border-color: var(--text); }
+
+    .go-btn {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 13px;
+      background: var(--text);
+      color: var(--bg);
+      border: none;
+      padding: 8px 14px;
+      cursor: pointer;
+      letter-spacing: 0.08em;
+      white-space: nowrap;
+    }
+    .go-btn:hover  { opacity: 0.8; }
+    .go-btn:active { transform: scale(0.97); }
+
+    /* ── STATUS ── */
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--green-dot);
+      flex-shrink: 0;
+      animation: pulse-ok 2s infinite;
+    }
+    .status-dot.warn  { background: var(--amber); animation: pulse-warn 1s infinite; }
+    .status-dot.alarm { background: var(--red);   animation: pulse-warn 0.4s infinite; }
+
+    @keyframes pulse-ok   { 0%,100%{opacity:1} 50%{opacity:.4} }
+    @keyframes pulse-warn { 0%,100%{opacity:1} 50%{opacity:.2} }
+
+    /* ── ADC block ── */
+    .adc-data {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 12px;
+      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .adc-data span.alarm { color: var(--red); }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="header-top">
+      <span class="system-tag">SYS-BEKO v1.0</span>
+      <h1>Rotor Antenowy</h1>
+    </div>
+    <p class="subtitle">ZDALNY STEROWNIK ROTORA &nbsp;/&nbsp; SYSTEM NASŁUCHOWY</p>
+  </div>
+
+  <div class="main-grid">
+
+    <!-- LEFT: compass + readouts + log -->
+    <div class="compass-area">
+      <canvas id="compassCanvas" width="280" height="280"></canvas>
+
+      <div class="az-row">
+        <div class="az-col">
+          <div class="az-label">RZECZYWISTY</div>
+          <div class="az-val" id="actualDisplay">000°</div>
+        </div>
+        <div class="az-sep">/</div>
+        <div class="az-col">
+          <div class="az-label">ZADANY</div>
+          <div class="az-val target" id="targetDisplay">000°</div>
+        </div>
+        <div id="deltaBadge" class="delta-badge">Δ 0°</div>
+      </div>
+
+      <div class="log-area">
+        <div class="panel-label">LOG ZDARZEŃ</div>
+        <div class="log-list" id="logList"></div>
+      </div>
+    </div>
+
+    <!-- RIGHT: controls -->
+    <div class="controls-panel">
+
+      <div class="panel-block">
+        <div class="panel-label">STATUS ŁĄCZA</div>
+        <div class="status-row">
+          <div class="status-dot" id="statusDot"></div>
+          <span id="statusText">ŁĄCZE AKTYWNE / FSK 868 MHz</span>
+        </div>
+      </div>
+
+      <div class="panel-block">
+        <div class="panel-label">NASTAWA WZGLĘDNA</div>
+        <div class="btn-row">
+          <button class="btn" onclick="nudge(-10)">−10°</button>
+          <button class="btn" onclick="nudge(+10)">+10°</button>
+          <button class="btn" onclick="nudge(-1)">−1°</button>
+          <button class="btn" onclick="nudge(+1)">+1°</button>
+        </div>
+      </div>
+
+      <div class="panel-block">
+        <div class="panel-label">WĘZEŁ DOCELOWY</div>
+        <select id="nodeSelect" style="width: 100%; padding: 8px 10px; border: 0.5px solid var(--border2); background: var(--bg); color: var(--text); font-family: 'Share Tech Mono', monospace; cursor: pointer;">
+          <option value="1">Węzeł 1 (0x01)</option>
+          <option value="255">Broadcast (0xFF)</option>
+        </select>
+      </div>
+
+      <div class="panel-block">
+        <div class="panel-label">AZYMUT BEZWZGLĘDNY</div>
+        <div class="target-input-row">
+          <input type="number" class="az-input" id="absInput" min="0" max="359" placeholder="0–359" />
+          <button class="go-btn" onclick="goAbs()">IDŹ</button>
+        </div>
+      </div>
+
+      <div class="panel-block">
+        <div class="panel-label">SZYBKI AZYMUT</div>
+        <div class="btn-row">
+          <button class="btn" onclick="goTo(0)">N 0°</button>
+          <button class="btn" onclick="goTo(90)">E 90°</button>
+          <button class="btn" onclick="goTo(180)">S 180°</button>
+          <button class="btn" onclick="goTo(270)">W 270°</button>
+        </div>
+      </div>
+
+      <div class="panel-block">
+        <div class="panel-label">OCHRONA SYSTEMU</div>
+        <div class="btn-row">
+          <button class="btn btn-wide btn-danger" onclick="eStop()">⬛ STOP AWARYJNY</button>
+          <button class="btn" onclick="testBlock()">SIM. BLOKADA</button>
+          <button class="btn" onclick="clearAlarm()">KASUJ ALARM</button>
+        </div>
+      </div>
+
+      <div class="panel-block">
+        <div class="panel-label">POTENCJOMETR ADC</div>
+        <div class="adc-data">
+          <div>RAW: <span id="adcRaw">--</span></div>
+          <div>KĄT POT: <span id="adcAngle">--</span>°</div>
+          <div>DELTA: <span id="adcDelta">--</span>°</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    const COMPASS_SIZE = 280;
+    const CX = COMPASS_SIZE / 2;
+    const CY = COMPASS_SIZE / 2;
+    const R  = 118;
+
+    let actualAngle    = 0;
+    let targetAngle    = 0;
+    let potAngle       = 0;
+    let blocked        = false;
+    let stopped        = false;
+    let animFrame;
+    let lastAlarmState = false;  // edge-detect for alarm log entries
+
+    const canvas = document.getElementById('compassCanvas');
+    const ctx    = canvas.getContext('2d');
+
+    const isDark = () => window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+    function getColors() {
+      return isDark() ? {
+        ring:      'rgba(255,255,255,0.10)',
+        tick:      'rgba(255,255,255,0.22)',
+        tickMaj:   'rgba(255,255,255,0.50)',
+        label:     'rgba(255,255,255,0.50)',
+        needle:    '#f0ede8',
+        target:    'rgba(255,255,255,0.22)',
+        center:    '#f0ede8',
+        pot:       'rgba(93,202,165,0.75)',
+      } : {
+        ring:      'rgba(0,0,0,0.08)',
+        tick:      'rgba(0,0,0,0.18)',
+        tickMaj:   'rgba(0,0,0,0.50)',
+        label:     'rgba(0,0,0,0.48)',
+        needle:    '#111111',
+        target:    'rgba(0,0,0,0.18)',
+        center:    '#111111',
+        pot:       'rgba(15,110,86,0.72)',
+      };
+    }
+
+    function drawCompass() {
+      const c = getColors();
+      ctx.clearRect(0, 0, COMPASS_SIZE, COMPASS_SIZE);
+
+      /* outer ring */
+      ctx.beginPath();
+      ctx.arc(CX, CY, R + 10, 0, Math.PI * 2);
+      ctx.strokeStyle = c.ring;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      /* ticks */
+      for (let deg = 0; deg < 360; deg += 5) {
+        const rad    = (deg - 90) * Math.PI / 180;
+        const isMaj  = deg % 30 === 0;
+        const isMed  = deg % 10 === 0;
+        const inner  = R - (isMaj ? 14 : isMed ? 8 : 4);
+        ctx.beginPath();
+        ctx.moveTo(CX + Math.cos(rad) * inner, CY + Math.sin(rad) * inner);
+        ctx.lineTo(CX + Math.cos(rad) * R,     CY + Math.sin(rad) * R);
+        ctx.strokeStyle = isMaj ? c.tickMaj : c.tick;
+        ctx.lineWidth   = isMaj ? 1.2 : 0.6;
+        ctx.stroke();
+      }
+
+      /* cardinal labels */
+      const dirs      = ['N','NE','E','SE','S','SW','W','NW'];
+      const dirAngles = [0, 45, 90, 135, 180, 225, 270, 315];
+      ctx.font        = '500 12px Barlow Condensed, sans-serif';
+      ctx.textAlign   = 'center';
+      ctx.textBaseline = 'middle';
+      dirAngles.forEach((deg, i) => {
+        const rad  = (deg - 90) * Math.PI / 180;
+        const dist = R - 26;
+        ctx.fillStyle = (i % 2 === 0) ? c.tickMaj : c.label;
+        ctx.fillText(dirs[i], CX + Math.cos(rad) * dist, CY + Math.sin(rad) * dist);
+      });
+
+      /* target marker */
+      const targetRad = (targetAngle - 90) * Math.PI / 180;
+      ctx.beginPath();
+      ctx.arc(CX, CY, R - 8, targetRad - 0.06, targetRad + 0.06);
+      ctx.strokeStyle = c.target;
+      ctx.lineWidth   = 8;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(CX + Math.cos(targetRad) * (R - 20), CY + Math.sin(targetRad) * (R - 20));
+      ctx.lineTo(CX + Math.cos(targetRad) * (R + 8),  CY + Math.sin(targetRad) * (R + 8));
+      ctx.strokeStyle = c.target;
+      ctx.lineWidth   = 1.5;
+      ctx.stroke();
+
+      /* potentiometer line */
+      const potRad = (potAngle - 90) * Math.PI / 180;
+      ctx.beginPath();
+      ctx.moveTo(CX, CY);
+      ctx.lineTo(CX + Math.cos(potRad) * (R - 30), CY + Math.sin(potRad) * (R - 30));
+      ctx.strokeStyle = c.pot;
+      ctx.lineWidth   = 2;
+      ctx.stroke();
+
+      /* main needle */
+      const needleRad = (actualAngle - 90) * Math.PI / 180;
+      const tipX  = CX + Math.cos(needleRad) * (R - 10);
+      const tipY  = CY + Math.sin(needleRad) * (R - 10);
+      const backX = CX + Math.cos(needleRad + Math.PI) * 20;
+      const backY = CY + Math.sin(needleRad + Math.PI) * 20;
+      const perpX = Math.cos(needleRad + Math.PI / 2) * 6;
+      const perpY = Math.sin(needleRad + Math.PI / 2) * 6;
+
+      ctx.beginPath();
+      ctx.moveTo(tipX, tipY);
+      ctx.lineTo(CX + perpX, CY + perpY);
+      ctx.lineTo(backX, backY);
+      ctx.lineTo(CX - perpX, CY - perpY);
+      ctx.closePath();
+      ctx.fillStyle = c.needle;
+      ctx.fill();
+
+      /* center dot */
+      ctx.beginPath();
+      ctx.arc(CX, CY, 5, 0, Math.PI * 2);
+      ctx.fillStyle = c.center;
+      ctx.fill();
+    }
+
+    function formatDeg(n) {
+      return String(Math.round(((n % 360) + 360) % 360)).padStart(3, '0') + '°';
+    }
+
+    function updateUI() {
+      document.getElementById('actualDisplay').textContent = formatDeg(actualAngle);
+      document.getElementById('targetDisplay').textContent = formatDeg(targetAngle);
+
+      const raw   = Math.abs(Math.round(actualAngle - targetAngle));
+      const delta = raw > 180 ? 360 - raw : raw;
+      const badge = document.getElementById('deltaBadge');
+      badge.textContent = 'Δ ' + delta + '°';
+      badge.className   = 'delta-badge' + (delta > 10 ? ' alarm' : '');
+
+      // ADC panel — potAngle mirrors actual_angle from TELEM
+      const adcRaw   = Math.round(1200 + (potAngle / 180) * 10800);
+      const adcDelta = Math.abs(Math.round(actualAngle) - Math.round(potAngle));
+      document.getElementById('adcRaw').textContent   = adcRaw;
+      document.getElementById('adcAngle').textContent = Math.round(potAngle);
+      const adcEl = document.getElementById('adcDelta');
+      adcEl.textContent = adcDelta;
+      adcEl.className   = adcDelta > 10 ? 'alarm' : '';
+
+      drawCompass();
+    }
+
+    function animate() {
+      if (stopped || blocked) { return; }
+      const diff = ((targetAngle - actualAngle + 540) % 360) - 180;
+      if (Math.abs(diff) < 0.5) {
+        actualAngle = targetAngle;
+        potAngle    = actualAngle;
+        updateUI();
+        return;
+      }
+      const step  = Math.sign(diff) * Math.min(Math.abs(diff), 1.5);
+      actualAngle = (actualAngle + step + 360) % 360;
+      potAngle    = actualAngle + (Math.random() - 0.5) * 1.5;
+      potAngle    = Math.max(0, Math.min(180, potAngle));
+      updateUI();
+      animFrame = requestAnimationFrame(animate);
+    }
+
+    // ── Core command sender ────────────────────────────────────────────────────
+    // All azimuth buttons funnel through goTo().
+    // goTo() starts a local preview animation immediately, then POSTs to the
+    // backend. When the real TELEM comes back the actual_angle is snapped to
+    // the confirmed value. Status polling at 500 ms handles intermediate updates.
+
+    function goTo(deg) {
+      if (stopped) return;
+      blocked = false;
+      cancelAnimationFrame(animFrame);
+      targetAngle = ((deg % 360) + 360) % 360;
+      addLog('CMD→' + formatDeg(targetAngle), 'ok');
+      setStatus('warn', 'WYSYŁANIE...');
+      animate();  // preview animation while radio transaction is in flight
+
+      fetch('/api/command', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ azimuth: targetAngle, op_code: 1 }),
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          if (data.actual_angle !== null && data.actual_angle !== undefined) {
+            actualAngle = data.actual_angle;
+            potAngle    = data.actual_angle;
+          }
+          setStatus('ok', 'ŁĄCZE AKTYWNE / FSK 868 MHz');
+          addLog('OK→' + formatDeg(data.actual_angle) + ' srv=' + data.servo_status, 'ok');
+        } else {
+          setStatus('alarm', 'BŁĄD: ' + data.error);
+          addLog('ERR: ' + data.error, 'alarm');
+        }
+        updateUI();
+      })
+      .catch(e => {
+        setStatus('warn', 'BŁĄD SIECI');
+        addLog('net err: ' + e.message, 'alarm');
+      });
+    }
+
+    function nudge(delta) {
+      goTo(targetAngle + delta);
+    }
+
+    function goAbs() {
+      const v = parseInt(document.getElementById('absInput').value);
+      if (isNaN(v) || v < 0 || v > 359) return;
+      goTo(v);
+    }
+
+    function eStop() {
+      stopped = true;
+      cancelAnimationFrame(animFrame);
+      setStatus('alarm', 'STOP AWARYJNY AKTYWNY');
+      addLog('!!! STOP AWARYJNY', 'alarm');
+      fetch('/api/stop', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => { if (!data.ok) addLog('STOP ERR: ' + data.error, 'alarm'); })
+        .catch(e => addLog('STOP net err: ' + e.message, 'alarm'));
+    }
+
+    function testBlock() {
+      blocked = true;
+      cancelAnimationFrame(animFrame);
+      setStatus('warn', 'ALARM: ROTOR ZABLOKOWANY');
+      addLog('ALARM: blokada rotora @ ' + formatDeg(actualAngle), 'alarm');
+    }
+
+    function clearAlarm() {
+      setStatus('warn', 'ODBLOKOWYWANIE...');
+      addLog('KASUJ ALARM → UNLOCK...', 'warn');
+      fetch('/api/alarm/clear', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+          if (data.ok) {
+            blocked        = false;
+            stopped        = false;
+            lastAlarmState = false;
+            setStatus('ok', 'ŁĄCZE AKTYWNE / FSK 868 MHz');
+            addLog('alarm skasowany', 'ok');
+            animate();
+          } else {
+            setStatus('alarm', 'UNLOCK NIEUDANY: ' + data.error);
+            addLog('UNLOCK ERR: ' + data.error, 'alarm');
+          }
+        })
+        .catch(e => {
+          setStatus('warn', 'BŁĄD SIECI');
+          addLog('UNLOCK net err: ' + e.message, 'alarm');
+        });
+    }
+
+    function setStatus(type, text) {
+      document.getElementById('statusDot').className   = 'status-dot' + (type !== 'ok' ? ' ' + type : '');
+      document.getElementById('statusText').textContent = text;
+    }
+
+    let logLines = [];
+    function addLog(msg, type) {
+      const now = new Date();
+      const ts  = [now.getHours(), now.getMinutes(), now.getSeconds()]
+                    .map(n => String(n).padStart(2,'0')).join(':');
+      logLines.unshift({ ts, msg, type });
+      if (logLines.length > 40) logLines.pop();
+      document.getElementById('logList').innerHTML = logLines
+        .map(l => `<div class="log-entry ${l.type}">${l.ts}  ${l.msg}</div>`)
+        .join('');
+    }
+
+    /* init */
+    addLog('system uruchomiony', 'ok');
+    addLog('węzeł BEKO-01 aktywny', 'ok');
+    updateUI();
+    drawCompass();
+
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawCompass);
+
+    // ── Status polling (500 ms) ────────────────────────────────────────────────
+    setInterval(() => {
+      fetch('/api/status')
+        .then(r => r.json())
+        .then(data => {
+          // Snap needle to real telemetry position when available
+          if (data.actual_angle !== null && data.actual_angle !== undefined) {
+            actualAngle = data.actual_angle;
+            potAngle    = data.actual_angle;
+          }
+
+          // Edge-detect alarm state so we only log once per alarm event
+          if (data.alarm && !lastAlarmState) {
+            lastAlarmState = true;
+            stopped = true;
+            cancelAnimationFrame(animFrame);
+            setStatus('alarm', 'ALARM: ' + (data.alarm_msg || 'BŁĄD'));
+            addLog(
+              'ALARM: ' + (data.alarm_msg || '?') +
+              ' @ ' + formatDeg(data.alarm_angle || 0),
+              'alarm'
+            );
+          } else if (!data.alarm) {
+            lastAlarmState = false;
+          }
+
+          // Update status indicator only when we are not in a user-triggered state
+          if (!data.alarm && !stopped && !blocked) {
+            if (data.state && data.state !== 'IDLE') {
+              setStatus('warn', 'WYSYŁANIE...');
+            } else if (data.link_ok) {
+              setStatus('ok', 'ŁĄCZE AKTYWNE / FSK 868 MHz');
+            } else {
+              setStatus('warn', 'BRAK POŁĄCZENIA');
+            }
+          }
+
+          updateUI();
+        })
+        .catch(e => console.warn('Status poll error:', e));
+    }, 500);
+  </script>
+</body>
+</html>
