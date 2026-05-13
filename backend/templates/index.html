@@ -359,8 +359,12 @@
           <button class="btn btn-wide btn-danger" onclick="eStop()">⬛ STOP AWARYJNY</button>
           <button class="btn" onclick="testBlock()">SIM. BLOKADA</button>
           <button class="btn" onclick="clearAlarm()">KASUJ ALARM</button>
-          <button class="btn btn-wide" id="restartBtn" onclick="restartBackend()" style="letter-spacing:0.1em;font-size:13px;">↺ RESTART SERWISU</button>
         </div>
+      </div>
+
+      <div class="panel-block">
+        <div class="panel-label">SERWIS</div>
+        <button class="btn btn-wide" id="restartBtn" onclick="restartBackend()" style="width:100%;letter-spacing:0.1em;font-size:13px;padding:9px 0;">↺ RESTART SERWISU</button>
       </div>
 
       <div class="panel-block">
@@ -529,38 +533,20 @@
       drawCompass();
     }
 
-    function animate() {
-      if (stopped || blocked) { return; }
-      const diff = ((targetAngle - actualAngle + 540) % 360) - 180;
-      if (Math.abs(diff) < 0.5) {
-        actualAngle = targetAngle;
-        updateUI();
-        return;
-      }
-      const step  = Math.sign(diff) * Math.min(Math.abs(diff), 1.5);
-      actualAngle = (actualAngle + step + 360) % 360;
+    function setAngle(deg) {
+      confirmedAngle = ((deg % 360) + 360) % 360;
+      targetAngle    = confirmedAngle;
+      actualAngle    = confirmedAngle;
       updateUI();
-      animFrame = requestAnimationFrame(animate);
     }
-
-    // ── Core command sender ────────────────────────────────────────────────────
-    // The compass needle shows confirmedAngle — the last setpoint acknowledged
-    // by STM32 TELEM. On a new command the needle animates toward targetAngle
-    // as a preview. If TELEM never arrives (timeout / ALARM) the needle reverts
-    // to confirmedAngle. ADC actual_angle from the status poll is verification
-    // only and never drives the compass needle.
 
     function goTo(deg) {
       if (stopped) return;
-      blocked = false;
-      cancelAnimationFrame(animFrame);
       const prevConfirmed = confirmedAngle;
-      targetAngle = ((deg % 360) + 360) % 360;
-      addLog('CMD→' + formatDeg(targetAngle), 'ok');
+      const sentTarget    = ((deg % 360) + 360) % 360;
+      addLog('CMD→' + formatDeg(sentTarget), 'ok');
       setStatus('warn', 'WYSYŁANIE...');
-      animate();  // preview — needle moves toward targetAngle while we wait
 
-      const sentTarget = targetAngle;  // capture in case nudge fires again mid-flight
       fetch('/api/command', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -569,34 +555,24 @@
       .then(r => r.json())
       .then(data => {
         if (data.ok) {
-          // TELEM confirmed — accept operator setpoint as the real angle
-          confirmedAngle = sentTarget;
-          if (data.actual_angle !== null && data.actual_angle !== undefined) {
-            potAngle = data.actual_angle;  // ADC reading → verification panel only
-          }
+          setAngle(sentTarget);
+          if (data.actual_angle !== null && data.actual_angle !== undefined)
+            potAngle = data.actual_angle;
           setStatus('ok', 'ŁĄCZE AKTYWNE / FSK 868 MHz');
-          // result logged via backend event "TELEM ←"
         } else {
-          // No confirmation — revert needle to last confirmed position
-          targetAngle = prevConfirmed;
-          cancelAnimationFrame(animFrame);
-          animate();
+          setAngle(prevConfirmed);
           setStatus('alarm', 'BŁĄD: ' + data.error);
-          // error logged via backend event "ERR:" or "ALARM ←"
         }
-        updateUI();
       })
       .catch(e => {
-        targetAngle = prevConfirmed;
-        cancelAnimationFrame(animFrame);
-        animate();
+        setAngle(prevConfirmed);
         setStatus('warn', 'BŁĄD SIECI');
         addLog('net err: ' + e.message, 'alarm');
       });
     }
 
     function nudge(delta) {
-      goTo(targetAngle + delta);
+      goTo(confirmedAngle + delta);
     }
 
     function goAbs() {
@@ -642,7 +618,6 @@
               potAngle       = data.actual_angle;
             }
             setStatus('ok', 'ŁĄCZE AKTYWNE / FSK 868 MHz');
-            animate();
             // result logged via backend event "UNLOCK OK ←"
           } else {
             setStatus('alarm', 'UNLOCK NIEUDANY: ' + data.error);
