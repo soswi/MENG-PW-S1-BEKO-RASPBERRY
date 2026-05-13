@@ -518,11 +518,10 @@
       badge.textContent = 'Δ ' + delta + '°';
       badge.className   = 'delta-badge' + (delta > 10 ? ' alarm' : '');
 
-      // ADC panel — potAngle mirrors actual_angle from TELEM
-      const adcRaw   = Math.round(1200 + (potAngle / 180) * 10800);
-      const adcDelta = Math.abs(Math.round(actualAngle) - Math.round(potAngle));
-      document.getElementById('adcRaw').textContent   = adcRaw;
-      document.getElementById('adcAngle').textContent = Math.round(potAngle);
+      // ADC panel — shows last TELEM-reported position, frozen between commands
+      const adcDelta = Math.abs(Math.round(confirmedAngle) - Math.round(potAngle));
+      document.getElementById('adcRaw').textContent   = potAngle !== null ? Math.round(potAngle) + '°' : '--';
+      document.getElementById('adcAngle').textContent = potAngle !== null ? Math.round(potAngle) : '--';
       const adcEl = document.getElementById('adcDelta');
       adcEl.textContent = adcDelta;
       adcEl.className   = adcDelta > 10 ? 'alarm' : '';
@@ -705,24 +704,32 @@
         .join('');
     }
 
-    /* init */
+    /* init — read angle once from backend, then never again */
     addLog('system uruchomiony', 'ok');
     addLog('węzeł BEKO-01 aktywny', 'ok');
-    updateUI();
-    drawCompass();
+    fetch('/api/status?after=0')
+      .then(r => r.json())
+      .then(data => {
+        if (data.actual_angle !== null && data.actual_angle !== undefined) {
+          confirmedAngle = data.actual_angle;
+          targetAngle    = data.actual_angle;
+          actualAngle    = data.actual_angle;
+          potAngle       = data.actual_angle;
+          addLog('pozycja startowa: ' + formatDeg(data.actual_angle), 'ok');
+        }
+        updateUI();
+        drawCompass();
+      })
+      .catch(() => { updateUI(); drawCompass(); });
 
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawCompass);
 
     // ── Status polling (500 ms) ────────────────────────────────────────────────
+    // Angles are tracked locally only — poll never touches any angle variable.
     setInterval(() => {
       fetch('/api/status?after=' + lastEventId)
         .then(r => r.json())
         .then(data => {
-          // ADC reading — verification panel only, does NOT drive the compass needle
-          if (data.actual_angle !== null && data.actual_angle !== undefined) {
-            potAngle = data.actual_angle;
-          }
-
           // Append backend events to the log panel
           (data.events || []).forEach(e => {
             addLog(e.msg, e.kind);
