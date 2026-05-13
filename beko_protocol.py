@@ -83,7 +83,7 @@ AES_KEY = bytes([
 # ---------------------------------------------------------------------------
 # Protocol timing (milliseconds)
 # ---------------------------------------------------------------------------
-TELEM_TIMEOUT_MS  = 5000   # Max wait for TELEM after sending CMD
+TELEM_TIMEOUT_MS  = 10000  # Max wait for TELEM after sending CMD
 ACK_TIMEOUT_MS    = 2000   # Max wait for ACK from STM32
 ALARM_RETRY_MS    = 5000   # STM32 retransmits ALARM every 5 s
 FAILSAFE_TIMEOUT_S = 30    # STM32 enters fail-safe after 30 s silence
