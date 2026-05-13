@@ -5,7 +5,7 @@ After=network.target
 [Service]
 User=centrala
 WorkingDirectory=/home/centrala/MENG-PW-S1-BEKO-WEB/rotor/backend
-ExecStart=/usr/bin/python3 app.py
+ExecStart=/home/centrala/MENG-PW-S1-BEKO-WEB/venv/bin/python3 app.py
 Restart=on-failure
 RestartSec=3s
 StandardOutput=journal
